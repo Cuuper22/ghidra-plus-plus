@@ -24,9 +24,9 @@ import java.util.concurrent.TimeUnit;
 
 /** Coordinates static program evidence, typed semantic judgments, and reviewable edits. */
 public final class AnalysisEngine implements AutoCloseable {
-    private static final int BATCH_SIZE = 6;
-    // Byte count is deliberately below Jev's 32k-token single-question context limit.
-    private static final int MAX_REQUEST_BYTES = 24_000;
+    // Saving the Ghidra project after every answer is slow, so save after a few.
+    private static final int SAVE_INTERVAL = 6;
+    // Keeps one function's evidence well below Jev's 32k-token context limit.
     private static final int MAX_STATE_BYTES = 12_000;
     private static final String[] ROLES = {
         "unknown", "initialization", "input", "output", "parsing", "validation",
@@ -258,40 +258,41 @@ public final class AnalysisEngine implements AutoCloseable {
         if ("fast".equals(selectedDepth) && ordered.size() > 40) ordered = new ArrayList<>(ordered.subList(0, 40));
         setProgress("analyzing", "Classifying functions", 0, allFunctions, "");
         int done = 0;
-        List<Pending> pending = new ArrayList<>();
+        int unsaved = 0;
         for (JsonObject function : ordered) {
             awaitActive();
             String address = string(function, "address");
             JsonObject evidence;
             synchronized (bridgeLock) { evidence = bridge.evidence(address); }
-            if (evidence == null) { increment(++done); continue; }
-            JsonObject state = stateFor(evidence, selectedDepth);
-            JsonArray support = supportFor(evidence, address);
-            List<String> candidates = candidates(state, function);
-            JsonObject questions = questions(candidates);
-            String fingerprint = sha256(evidence.toString());
-            String cacheKey = sha256(TypeSafeClient.MODEL + "\n" + state + "\n" + questions);
-            invalidateStale(address, fingerprint);
-            JsonObject cached;
-            synchronized (lock) { cached = cache.get(cacheKey); }
-            if (cached != null) {
-                consume(address, function, fingerprint, support, candidates, cached, TypeSafeClient.MODEL);
-                increment(++done);
-                continue;
+            if (evidence != null) {
+                JsonObject state = stateFor(evidence, selectedDepth);
+                List<String> candidates = candidates(state, function);
+                JsonObject questions = questions(candidates);
+                String fingerprint = sha256(evidence.toString());
+                String cacheKey = sha256(TypeSafeClient.MODEL + "\n" + state + "\n" + questions);
+                invalidateStale(address, fingerprint);
+                JsonObject decision;
+                synchronized (lock) { decision = cache.get(cacheKey); }
+                String model = TypeSafeClient.MODEL;
+                if (decision == null) {
+                    // One function per request: Jev answers best when the state holds only the evidence being judged.
+                    JsonObject response = evaluate(state, questions);
+                    if (!string(response, "model").isBlank()) model = string(response, "model");
+                    JsonObject answers = response.getAsJsonObject("answers");
+                    decision = new JsonObject();
+                    decision.add("role", requireAnswer(answers, "role"));
+                    if (!candidates.isEmpty()) decision.add("name", requireAnswer(answers, "name"));
+                    synchronized (lock) { cache.put(cacheKey, decision.deepCopy()); }
+                    unsaved++;
+                }
+                consume(address, function, fingerprint, supportFor(evidence, address), candidates, decision, model);
+                if (unsaved >= SAVE_INTERVAL) {
+                    synchronized (bridgeLock) { persist(); }
+                    unsaved = 0;
+                }
             }
-            Pending item = new Pending(address, function, state, support, candidates, questions, fingerprint, cacheKey);
-            if (!pending.isEmpty()) {
-                List<Pending> proposedBatch = new ArrayList<>(pending);
-                proposedBatch.add(item);
-                if (requestBytes(proposedBatch) > MAX_REQUEST_BYTES) done = flush(pending, done);
-            }
-            pending.add(item);
-            if (requestBytes(pending) > MAX_REQUEST_BYTES) {
-                throw new IllegalStateException("Function evidence is too large for a safe TypeSafe request");
-            }
-            if (pending.size() >= BATCH_SIZE) done = flush(pending, done);
+            increment(++done);
         }
-        if (!pending.isEmpty()) done = flush(pending, done);
         synchronized (bridgeLock) { persist(); }
         String detail = done < allFunctions
             ? "Fast pass complete: " + done + " of " + allFunctions + " functions analyzed; use balanced or exhaustive for the rest"
@@ -299,23 +300,23 @@ public final class AnalysisEngine implements AutoCloseable {
         setProgress("complete", detail, done, allFunctions, "");
     }
 
-    private int flush(List<Pending> batch, int done) throws Exception {
-        evaluateBatch(batch);
-        int finished = done + batch.size();
-        increment(finished);
-        batch.clear();
-        return finished;
-    }
-
-    private void evaluateBatch(List<Pending> batch) throws Exception {
-        JsonObject request = buildRequest(batch);
-        JsonObject response;
+    private JsonObject evaluate(JsonObject state, JsonObject questions) throws Exception {
+        JsonObject request = new JsonObject();
+        request.addProperty("model", TypeSafeClient.MODEL);
+        request.add("state", state);
+        request.add("questions", questions);
         int retries = 0;
         while (true) {
             awaitActive();
             try {
-                response = client.evaluate(request, apiKey);
-                break;
+                JsonObject response = client.evaluate(request, apiKey);
+                synchronized (lock) {
+                    requests++;
+                    JsonObject usage = object(response, "usage");
+                    inputTokens += number(usage, "input_tokens");
+                    outputTokens += number(usage, "output_tokens");
+                }
+                return response;
             } catch (CancellationException paused) {
                 awaitActive();
             } catch (TypeSafeClient.HttpFailure e) {
@@ -323,48 +324,6 @@ public final class AnalysisEngine implements AutoCloseable {
                 Thread.sleep((long) (1000 * Math.pow(2, retries++)));
             }
         }
-        JsonObject answers = response.getAsJsonObject("answers");
-        String actualModel = string(response, "model");
-        if (actualModel.isBlank()) actualModel = TypeSafeClient.MODEL;
-        synchronized (lock) {
-            requests++;
-            JsonObject usage = object(response, "usage");
-            inputTokens += number(usage, "input_tokens");
-            outputTokens += number(usage, "output_tokens");
-        }
-        for (int i = 0; i < batch.size(); i++) {
-            Pending item = batch.get(i);
-            JsonObject decision = new JsonObject();
-            decision.add("role", requireAnswer(answers, "f" + i + "_role"));
-            if (!item.candidates.isEmpty()) decision.add("name", requireAnswer(answers, "f" + i + "_name"));
-            synchronized (lock) { cache.put(item.cacheKey, decision.deepCopy()); }
-            consume(item.address, item.function, item.fingerprint, item.support, item.candidates, decision, actualModel);
-        }
-        synchronized (bridgeLock) { persist(); }
-    }
-
-    private static int requestBytes(List<Pending> batch) {
-        return buildRequest(batch).toString().getBytes(StandardCharsets.UTF_8).length;
-    }
-
-    private static JsonObject buildRequest(List<Pending> batch) {
-        JsonObject request = new JsonObject();
-        request.addProperty("model", TypeSafeClient.MODEL);
-        JsonArray state = new JsonArray();
-        JsonObject questions = new JsonObject();
-        int i = 0;
-        for (Pending item : batch) {
-            state.add(item.state);
-            for (Map.Entry<String, JsonElement> entry : item.questions.entrySet()) {
-                JsonObject question = entry.getValue().getAsJsonObject().deepCopy();
-                question.addProperty("instructions", "For state[" + i + "]: " + string(question, "instructions"));
-                questions.add("f" + i + "_" + entry.getKey(), question);
-            }
-            i++;
-        }
-        request.add("state", state);
-        request.add("questions", questions);
-        return request;
     }
 
     private void consume(String address, JsonObject function, String fingerprint, JsonArray support,
@@ -834,7 +793,5 @@ public final class AnalysisEngine implements AutoCloseable {
             return out.toString();
         } catch (Exception e) { throw new IllegalStateException(e); }
     }
-    private record Pending(String address, JsonObject function, JsonObject state, JsonArray support,
-                           List<String> candidates, JsonObject questions, String fingerprint, String cacheKey) {}
     @FunctionalInterface private interface Work { void run() throws Exception; }
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { RoleLabel } from "../describe";
 import type { Edge, FunctionItem } from "../types";
 import { Icon } from "./Icon";
 
@@ -80,11 +81,13 @@ function layout(
 export function GraphView({
   functions,
   edges,
+  roleLabels,
   selected,
   onSelect,
 }: {
   functions: FunctionItem[];
   edges: Edge[];
+  roleLabels: Map<string, RoleLabel>;
   selected: string;
   onSelect: (address: string) => void;
 }) {
@@ -116,23 +119,23 @@ export function GraphView({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Filter graph"
-            aria-label="Filter graph"
+            placeholder="Find a function"
+            aria-label="Find a function in connections"
           />
         </label>
         <span>
           {query
             ? `${graph.nodes.length.toLocaleString()} matching functions`
-            : `${graph.nodes.length.toLocaleString()} nearby of ${graph.total.toLocaleString()} functions`}
+            : `Showing ${graph.nodes.length.toLocaleString()} of ${graph.total.toLocaleString()} functions: the selected one and its neighbors`}
         </span>
       </div>
-      <div className="graph-scroll" aria-label="Call graph" ref={scroller}>
+      <div className="graph-scroll" aria-label="Connections" ref={scroller}>
         <svg
           width={graph.width}
           height={graph.height}
           viewBox={`0 0 ${graph.width} ${graph.height}`}
           role="group"
-          aria-label="Call graph. Select a function node to inspect it."
+          aria-label="Connections between functions. Select a box to open that function."
         >
           <defs>
             <marker
@@ -167,14 +170,17 @@ export function GraphView({
               />
             );
           })}
-          {graph.nodes.map((node) => (
+          {graph.nodes.map((node) => {
+            const known = roleLabels.get(node.item.address);
+            const role = known && `${known.label}${known.level === "low" ? "?" : ""}`;
+            return (
             <g
               key={node.item.address}
               className={`graph-node ${node.item.address === selected ? "selected" : ""}`}
               transform={`translate(${node.x - 94} ${node.y - 29})`}
               role="button"
               tabIndex={0}
-              aria-label={`${node.item.name}, address ${node.item.address}`}
+              aria-label={`${node.item.name}${role ? `, ${role}` : ""}, address ${node.item.address}`}
               onClick={() => onSelect(node.item.address)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
@@ -191,13 +197,14 @@ export function GraphView({
                   : node.item.name}
               </text>
               <text x="12" y="43" className="node-address">
-                {node.item.address}
+                {role ? `${role} · ${node.item.address}` : node.item.address}
               </text>
             </g>
-          ))}
+            );
+          })}
         </svg>
         {graph.nodes.length === 0 && (
-          <p className="graph-empty">No functions match this filter.</p>
+          <p className="graph-empty">No functions match that search.</p>
         )}
       </div>
     </div>

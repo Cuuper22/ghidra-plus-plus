@@ -1,157 +1,81 @@
-import { useEffect, useState } from "react";
-import type { Finding, FunctionEvidence, FunctionItem, Role } from "../types";
+import { useEffect, useMemo, useState } from "react";
+import type { EvidenceEntry, Finding, FunctionEvidence, FunctionItem, Role } from "../types";
+import {
+  inputsText,
+  isStart,
+  isUnnamed,
+  returnsText,
+  roleInfo,
+  sureness,
+} from "../describe";
 import { Icon } from "./Icon";
 
-function evidenceText(entry: unknown): string {
+const statusWords: Record<Finding["status"], string> = {
+  proposed: "Suggestion",
+  applied: "In use",
+  undone: "Undone",
+  rejected: "Out of date",
+};
+
+function entryText(entry: EvidenceEntry): string {
   if (typeof entry === "string") return entry;
-  if (entry && typeof entry === "object") {
-    const data = entry as { address?: string; text?: string };
-    return `${data.address ? `${data.address} · ` : ""}${data.text ?? JSON.stringify(entry)}`;
-  }
-  return String(entry);
+  return entry.text ?? JSON.stringify(entry);
 }
 
-function roleLabel(role: string): string {
-  return role
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function supportLine(entry: unknown): {
-  address: string;
-  field: string;
-  value: string;
-} {
-  const text = evidenceText(entry);
-  const match =
-    /^(\S+)\s+(signature|calledNames|strings|source):\s*([\s\S]*)$/.exec(text);
-  if (!match) return { address: "", field: "Evidence", value: text };
-  const [, address, field, raw] = match;
-  if (field === "source") return { address, field, value: "" };
+/** Turns an evidence line such as "140001000 strings: [...]" into a reader-facing label and value. */
+function reason(entry: EvidenceEntry): { label: string; value: string } {
+  const text = entryText(entry);
+  const match = /^\S+\s+(signature|calledNames|strings|source):\s*([\s\S]*)$/.exec(text);
+  if (!match) return { label: "Evidence", value: text };
+  const [, field, raw] = match;
+  const labels: Record<string, string> = {
+    signature: "Inputs and result",
+    calledNames: "Calls",
+    strings: "Text inside",
+    source: "Rebuilt code",
+  };
+  if (field === "source") return { label: labels.source, value: "" };
   const truncated = raw.endsWith(" [truncated]");
   const body = truncated ? raw.slice(0, -12) : raw;
   let value: string;
   try {
     const decoded: unknown = JSON.parse(body);
-    value = Array.isArray(decoded)
-      ? decoded.map(String).join(", ")
-      : String(decoded);
+    value = Array.isArray(decoded) ? decoded.map(String).join(", ") : String(decoded);
   } catch {
-    value = body
-      .replace(/^\[/, "")
-      .replace(/\]$/, "")
-      .replace(/^"/, "")
-      .replace(/"$/, "")
-      .replace(/","/g, ", ")
-      .replace(/\\n/g, " ")
-      .replace(/\\"/g, '"');
+    value = body.replace(/^\[|\]$/g, "").replace(/^"|"$/g, "").replace(/","/g, ", ");
   }
-  return { address, field, value: `${value}${truncated ? "…" : ""}` };
+  return { label: labels[field], value: `${value}${truncated ? "…" : ""}` };
 }
 
-function SupportList({
-  entries,
-  onShowSource,
-}: {
-  entries: unknown[];
-  onShowSource: () => void;
-}) {
-  const labels: Record<string, string> = {
-    signature: "Signature",
-    calledNames: "Calls",
-    strings: "Strings",
-  };
-  return (
-    <div className="evidence-list">
-      <h4>Evidence</h4>
-      <ul>
-        {entries.map((entry, index) => {
-          const line = supportLine(entry);
-          return (
-            <li key={index}>
-              {line.field === "source" ? (
-                <button
-                  className="evidence-source-link"
-                  type="button"
-                  onClick={onShowSource}
-                >
-                  Decompiled function at <code>{line.address}</code> · View
-                  Source
-                </button>
-              ) : (
-                <>
-                  <span className="evidence-label">
-                    {labels[line.field] || line.field}
-                    {line.address && (
-                      <>
-                        {" "}
-                        · <code>{line.address}</code>
-                      </>
-                    )}
-                  </span>
-                  <span>{line.value}</span>
-                </>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-    </div>
-  );
-}
-
-function Proposal({
+function Suggestion({
   finding,
   busy,
   onApply,
   onUndo,
-  onShowSource,
+  onShowCode,
 }: {
   finding: Finding;
   busy: boolean;
   onApply: (id: string) => void;
   onUndo: (id: string) => void;
-  onShowSource: () => void;
+  onShowCode: () => void;
 }) {
-  const confidence = Number.isFinite(finding.confidence)
-    ? finding.confidence <= 1
-      ? finding.confidence * 100
-      : finding.confidence
-    : null;
+  const value = finding.confidence <= 1 ? finding.confidence : finding.confidence / 100;
+  const sure = sureness(value);
   return (
-    <article className="proposal">
-      <div className="proposal-heading">
-        <span className={`status-dot ${finding.status}`} />
-        <span className="proposal-field">
-          {finding.field === "name"
-            ? "Proposed name"
-            : `Proposed ${finding.field}`}
-        </span>
-        <span className="proposal-status">{finding.status}</span>
-      </div>
+    <article className={`proposal ${finding.status}`}>
       <div className="proposal-value">{finding.after}</div>
-      {finding.role && (
-        <div className="proposal-role">
-          <span>Function role</span>
-          <strong>{roleLabel(finding.role)}</strong>
-        </div>
-      )}
-      {confidence !== null && (
-        <div className="confidence">
-          <div>
-            <span>Confidence</span>
-            <strong>{Math.round(confidence)}%</strong>
-          </div>
-          <meter
-            min="0"
-            max="100"
-            value={Math.max(0, Math.min(100, confidence))}
-            aria-label="Proposal confidence"
-          />
-        </div>
-      )}
-      {finding.evidence?.length > 0 && (
-        <SupportList entries={finding.evidence} onShowSource={onShowSource} />
+      <p className="sureness">
+        <span className={`sure-badge ${sure.level}`}>{sure.word}</span>
+        <span>
+          {Math.round(value * 100)}% sure · {statusWords[finding.status]}
+        </span>
+      </p>
+      {finding.status === "rejected" && (
+        <p className="muted-copy">
+          The code changed after this suggestion, so it was set aside. Click
+          Describe functions for a fresh one.
+        </p>
       )}
       <div className="proposal-actions">
         {finding.status === "proposed" || finding.status === "undone" ? (
@@ -161,7 +85,7 @@ function Proposal({
             disabled={busy}
             onClick={() => onApply(finding.id)}
           >
-            <Icon name="check" /> Apply
+            <Icon name="check" /> Use this name
           </button>
         ) : finding.status === "applied" ? (
           <button
@@ -174,61 +98,152 @@ function Proposal({
           </button>
         ) : null}
       </div>
+      {finding.evidence?.length > 0 && (
+        <details className="why">
+          <summary>Why this name?</summary>
+          <ul>
+            {finding.evidence.map((entry, index) => {
+              const line = reason(entry);
+              return (
+                <li key={index}>
+                  <strong>{line.label}</strong>{" "}
+                  {line.label === "Rebuilt code" ? (
+                    <button type="button" className="text-button inline" onClick={onShowCode}>
+                      View the code
+                    </button>
+                  ) : (
+                    line.value
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </details>
+      )}
     </article>
+  );
+}
+
+function FunctionLinks({
+  title,
+  addresses,
+  names,
+  byAddress,
+  empty,
+  onSelect,
+}: {
+  title: string;
+  addresses: string[] | undefined;
+  names?: string[];
+  byAddress: Map<string, FunctionItem>;
+  empty: string;
+  onSelect: (address: string) => void;
+}) {
+  const links = addresses ?? [];
+  return (
+    <div className="fact-group">
+      <h5>{title}</h5>
+      {links.length ? (
+        <div className="chips">
+          {links.map((address, index) => {
+            const target = byAddress.get(address);
+            return target ? (
+              <button
+                key={address}
+                type="button"
+                className="chip-button"
+                onClick={() => onSelect(address)}
+                title={`Open ${target.name}`}
+              >
+                {target.name}
+              </button>
+            ) : (
+              <span key={address} className="chip" title="Outside this program, for example in a system library">
+                {names?.[index] ?? address}
+              </span>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="muted-copy">{empty}</p>
+      )}
+    </div>
   );
 }
 
 export function Inspector({
   item,
+  functions,
   evidence,
   loading,
   findings,
   role,
   busy,
   configured,
+  analyzing,
+  showTips,
   onApply,
   onUndo,
   onRename,
-  onClassic,
-  onShowSource,
+  onOpenInGhidra,
+  onSelect,
+  onShowCode,
+  onOpenSettings,
+  onDescribe,
   collapsed,
   onCollapse,
 }: {
   item: FunctionItem | null;
+  functions: FunctionItem[];
   evidence: FunctionEvidence | null;
   loading: boolean;
   findings: Finding[];
   role: Role | null;
   busy: boolean;
   configured: boolean;
+  analyzing: boolean;
+  showTips: boolean;
   onApply: (id: string) => void;
   onUndo: (id: string) => void;
   onRename: (address: string, name: string) => Promise<string | null>;
-  onClassic: (address: string) => void;
-  onShowSource: () => void;
+  onOpenInGhidra: (address: string) => void;
+  onSelect: (address: string) => void;
+  onShowCode: () => void;
+  onOpenSettings: () => void;
+  onDescribe: () => void;
   collapsed: boolean;
   onCollapse: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
+  const byAddress = useMemo(
+    () => new Map(functions.map((value) => [value.address, value])),
+    [functions],
+  );
   useEffect(() => {
     setName(item?.name ?? "");
     setEditing(false);
     setRenameError(null);
   }, [item?.address, item?.name]);
+  const info = roleInfo(role);
+  // Ghidra lists each string as "address: text"; readers only need the text.
+  const strings = (evidence?.strings ?? [])
+    .map(entryText)
+    .filter((value) => !value.startsWith("[Ghidra++"))
+    .map((value) => /^([0-9a-f]+): ([\s\S]*)$/i.exec(value) ?? [value, "", value]);
   return (
     <aside
       className={`inspector ${collapsed ? "is-collapsed" : ""}`}
-      aria-label="Function inspector"
+      aria-label="About this function"
     >
       <div className="inspector-heading">
-        <h2>Function inspector</h2>
+        <h2>About this function</h2>
         <button
           className="icon-button"
           onClick={onCollapse}
           type="button"
-          aria-label={collapsed ? "Show inspector" : "Hide inspector"}
+          aria-label={collapsed ? "Show details" : "Hide details"}
         >
           <Icon name={collapsed ? "menu" : "close"} />
         </button>
@@ -239,31 +254,28 @@ export function Inspector({
             <div className="inspector-identity">
               <div className="identity-title">
                 <h3>{item.name}</h3>
-                <div className="identity-actions">
-                  <button
-                    className="text-button"
-                    type="button"
-                    onClick={() => {
-                      setEditing(!editing);
-                      setName(item.name);
-                      setRenameError(null);
-                    }}
-                  >
-                    {editing ? "Cancel" : "Rename"}
-                  </button>
-                  <button
-                    className="icon-button"
-                    type="button"
-                    onClick={() => onClassic(item.address)}
-                    title="Open in Classic"
-                    aria-label="Open selected function in Classic"
-                  >
-                    <Icon name="classic" />
-                  </button>
-                </div>
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={() => {
+                    setEditing(!editing);
+                    setName(item.name);
+                    setRenameError(null);
+                  }}
+                >
+                  {editing ? "Cancel" : "Rename"}
+                </button>
               </div>
-              <code>{item.address}</code>
-              <p>{item.signature}</p>
+              <p className="identity-address">
+                At address <code>{item.address}</code>
+                {isStart(item.name) && " · the program starts here"}
+              </p>
+              {showTips && isUnnamed(item.name) && !editing && (
+                <p className="tip-inline">
+                  Ghidra made up this name from the address. Rename it once you
+                  know what it does.
+                </p>
+              )}
               {editing && (
                 <form
                   className="rename-form"
@@ -272,16 +284,17 @@ export function Inspector({
                     const trimmed = name.trim();
                     if (!trimmed || trimmed === item.name) return setEditing(false);
                     const failure = /\s/.test(trimmed)
-                      ? "Names cannot contain spaces. Use letters, digits and underscores."
+                      ? "Use letters, digits and underscores, with no spaces. Example: read_settings"
                       : /^\d/.test(trimmed)
-                        ? "A name cannot start with a digit."
+                        ? "A name cannot start with a digit. Example: step2_check"
                         : await onRename(item.address, trimmed);
                     setRenameError(failure);
                     if (!failure) setEditing(false);
                   }}
                 >
+                  <label htmlFor="new-function-name">New name</label>
                   <input
-                    aria-label="New function name"
+                    id="new-function-name"
                     value={name}
                     onChange={(event) => {
                       setName(event.target.value);
@@ -304,106 +317,125 @@ export function Inspector({
                   )}
                 </form>
               )}
+              <button
+                className="link-button"
+                type="button"
+                onClick={() => onOpenInGhidra(item.address)}
+                title="Opens the classic Ghidra window on this function, for deeper work"
+              >
+                <Icon name="external" /> Open in full Ghidra
+              </button>
             </div>
-            {role && findings.length === 0 && (
-              <div className="inspector-section">
-                <h4>Function role</h4>
-                <div className="role-summary">
-                  <strong>{roleLabel(role.role)}</strong>
-                  <span>
-                    {Math.round(
-                      (role.confidence <= 1
-                        ? role.confidence * 100
-                        : role.confidence) || 0,
-                    )}
-                    % confidence
-                  </span>
-                </div>
-                {role.evidence?.length > 0 && (
-                  <SupportList
-                    entries={role.evidence}
-                    onShowSource={onShowSource}
-                  />
-                )}
-              </div>
-            )}
-            <div className="inspector-section">
-              <div className="section-title">
-                <h4>Analysis proposals</h4>
-                <span className="quiet-count">{findings.length}</span>
-              </div>
-              {findings.length ? (
-                findings.map((finding) => (
-                  <Proposal
+            <section className="inspector-section">
+              <h4>What it does</h4>
+              {info?.known ? (
+                <>
+                  <p className={`plain-description ${info.sure.level}`}>
+                    {info.sure.level === "low" && <strong>Best guess: </strong>}
+                    {info.sentence}
+                  </p>
+                  <p className="sureness">
+                    <span className={`sure-badge ${info.sure.level}`}>
+                      {info.sure.word}
+                    </span>
+                    <span>
+                      {info.label} · {info.percent}% sure
+                    </span>
+                  </p>
+                  {showTips && (
+                    <p className="tip-inline">
+                      TypeSafe chose this by reading the rebuilt code. Treat
+                      it as a hint and check it in the Code tab.
+                    </p>
+                  )}
+                </>
+              ) : info ? (
+                <p className="muted-copy">{info.sentence}</p>
+              ) : !configured ? (
+                <p className="muted-copy">
+                  Add a TypeSafe key to get a one-line description of each
+                  function.{" "}
+                  <button type="button" className="text-button inline" onClick={onOpenSettings}>
+                    Add a key
+                  </button>
+                </p>
+              ) : analyzing ? (
+                <p className="muted-copy">Describing functions now…</p>
+              ) : (
+                <p className="muted-copy">
+                  Not described yet.{" "}
+                  <button type="button" className="text-button inline" onClick={onDescribe}>
+                    Describe functions
+                  </button>
+                </p>
+              )}
+            </section>
+            {findings.length > 0 && (
+              <section className="inspector-section">
+                <h4>Suggested name</h4>
+                {findings.map((finding) => (
+                  <Suggestion
                     key={finding.id}
                     finding={finding}
                     busy={busy}
                     onApply={onApply}
                     onUndo={onUndo}
-                    onShowSource={onShowSource}
+                    onShowCode={onShowCode}
                   />
-                ))
-              ) : (
-                <p className="muted-copy">
-                  {loading
-                    ? "Loading evidence…"
-                    : !configured
-                      ? "Add a TypeSafe API key in Model settings to get proposals."
-                    : role
-                      ? "No name change proposed. The model kept the current name."
-                      : "No proposals for this function yet."}
-                </p>
-              )}
-            </div>
-            <div className="inspector-section">
-              <h4>Code evidence</h4>
+                ))}
+              </section>
+            )}
+            <section className="inspector-section">
+              <h4>Facts from Ghidra</h4>
               {loading ? (
-                <p className="muted-copy">Loading evidence…</p>
+                <p className="muted-copy">Loading…</p>
               ) : evidence ? (
                 <>
-                  <dl className="detail-list">
-                    <div>
-                      <dt>Return type</dt>
-                      <dd>{evidence.returnType || "Unknown"}</dd>
-                    </div>
-                    <div>
-                      <dt>Parameters</dt>
-                      <dd>{evidence.parameterCount ?? 0}</dd>
-                    </div>
-                    <div>
-                      <dt>Size</dt>
-                      <dd>{evidence.size ?? "Unknown"} bytes</dd>
-                    </div>
-                  </dl>
-                  {evidence.calledNames?.length ? (
-                    <div className="evidence-list">
-                      <h4>Calls</h4>
-                      <ul>
-                        {evidence.calledNames.map((value, index) => (
-                          <li key={index}>{value}</li>
+                  <ul className="fact-list">
+                    <li>{inputsText(evidence.parameterCount)}</li>
+                    <li>{returnsText(evidence.returnType)}</li>
+                    <li>{(evidence.size ?? 0).toLocaleString()} bytes of machine code</li>
+                  </ul>
+                  <FunctionLinks
+                    title="Uses"
+                    addresses={evidence.callees}
+                    names={evidence.calledNames}
+                    byAddress={byAddress}
+                    empty="Does not call other functions."
+                    onSelect={onSelect}
+                  />
+                  <FunctionLinks
+                    title="Used by"
+                    addresses={evidence.callers}
+                    byAddress={byAddress}
+                    empty="Nothing in this program calls it directly."
+                    onSelect={onSelect}
+                  />
+                  {strings.length > 0 && (
+                    <div className="fact-group">
+                      <h5>Text inside</h5>
+                      <ul className="text-list">
+                        {strings.map(([, address, value], index) => (
+                          <li key={index} title={address ? `At address ${address}` : undefined}>
+                            “{value}”
+                          </li>
                         ))}
                       </ul>
                     </div>
-                  ) : null}
-                  {evidence.strings?.length ? (
-                    <div className="evidence-list">
-                      <h4>Strings</h4>
-                      <ul>
-                        {evidence.strings.map((value, index) => (
-                          <li key={index}>{evidenceText(value)}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
+                  )}
+                  <div className="fact-group">
+                    <h5>Ghidra’s signature</h5>
+                    <code className="signature">{item.signature}</code>
+                  </div>
                 </>
               ) : (
-                <p className="muted-copy">Evidence is unavailable.</p>
+                <p className="muted-copy">Ghidra has no details for this function.</p>
               )}
-            </div>
+            </section>
           </div>
         ) : (
           <div className="inspector-empty">
-            Select a function to inspect its evidence and proposed changes.
+            Pick a function on the left to see what it does.
           </div>
         ))}
     </aside>

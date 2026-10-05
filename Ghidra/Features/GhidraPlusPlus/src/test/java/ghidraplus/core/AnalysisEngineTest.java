@@ -91,10 +91,10 @@ public final class AnalysisEngineTest {
         check("paused".equals(engine.snapshot().getAsJsonObject("analysis").get("status").getAsString()), "pause visible");
         client.release.countDown();
         Thread.sleep(250);
-        check(client.calls.get() == 1, "second batch waits for resume");
+        check(client.calls.get() == 1, "next request waits for resume");
         engine.resume();
         await(engine, "complete");
-        check(client.calls.get() == 2, "remaining task runs after resume");
+        check(client.calls.get() == 7, "remaining functions run after resume");
         engine.close();
     }
 
@@ -137,7 +137,7 @@ public final class AnalysisEngineTest {
         check(progress.get("completed").getAsInt() == 40, "fast pass analyzes 40");
         check(progress.get("total").getAsInt() == 45, "fast pass retains actual total");
         check(progress.get("message").getAsString().contains("40 of 45"), "partial completion disclosed");
-        check(client.maxRequestBytes.get() <= 24_000, "batched request stays inside conservative context budget");
+        check(client.maxRequestBytes.get() <= 24_000, "request stays inside conservative context budget");
         engine.close();
 
         FakeBridge exhaustiveBridge = new FakeBridge(5);
@@ -147,7 +147,6 @@ public final class AnalysisEngineTest {
         exhaustive.analyze("exhaustive", "fixed");
         await(exhaustive, "complete");
         check(exhaustiveClient.maxRequestBytes.get() <= 24_000, "exhaustive request stays inside context budget");
-        check(exhaustiveClient.calls.get() > 1, "large evidence splits into multiple batches");
         exhaustive.close();
     }
 
@@ -175,8 +174,11 @@ public final class AnalysisEngineTest {
         engine.analyze("balanced", "fixed");
         await(engine, "complete");
         JsonObject questions = client.lastRequest.getAsJsonObject("questions");
-        check(questions.has("f0_name"), "source-only function receives a name question");
-        JsonObject criteria = questions.getAsJsonObject("f0_name").getAsJsonObject("criteria");
+        check(questions.has("name"), "source-only function receives a name question");
+        // Mixing several functions into one state let evidence from one leak into another's answer.
+        check(client.lastRequest.get("state").isJsonObject() && client.lastRequest.getAsJsonObject("state").has("source"),
+            "each request carries exactly one function's evidence");
+        JsonObject criteria = questions.getAsJsonObject("name").getAsJsonObject("criteria");
         check(criteria.has("parse_unsigned_decimal") && criteria.has("unknown"), "pure-code candidate and unknown offered");
         check(!criteria.get("parse_unsigned_decimal").getAsString().isBlank(), "candidate has specific criterion");
         engine.close();
@@ -303,7 +305,7 @@ public final class AnalysisEngineTest {
             for (Map.Entry<String, JsonElement> question : request.getAsJsonObject("questions").entrySet()) {
                 JsonObject answer = new JsonObject();
                 answer.addProperty("type", "choice");
-                answer.addProperty("choice", question.getKey().endsWith("_role") ? "memory" : "allocate_buffer");
+                answer.addProperty("choice", "role".equals(question.getKey()) ? "memory" : "allocate_buffer");
                 answer.addProperty("confidence", 0.9);
                 answers.add(question.getKey(), answer);
             }

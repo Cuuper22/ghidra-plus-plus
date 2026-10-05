@@ -16,7 +16,10 @@ type Name =
   | "check"
   | "undo"
   | "key"
-  | "menu";
+  | "menu"
+  | "help"
+  | "spark"
+  | "external";
 const paths: Record<Name, ReactNode> = {
   import: (
     <>
@@ -89,6 +92,21 @@ const paths: Record<Name, ReactNode> = {
     </>
   ),
   menu: <path d="M4 6h16M4 12h16M4 18h16" />,
+  help: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.2-1 .8-1 1.4v.6M12 17h.01" />
+    </>
+  ),
+  spark: (
+    <path d="M12 3c.5 4 2 5.5 6 6-4 .5-5.5 2-6 6-.5-4-2-5.5-6-6 4-.5 5.5-2 6-6ZM18.5 15.5c.2 1.6.8 2.2 2.5 2.5-1.7.3-2.3.9-2.5 2.5-.2-1.6-.8-2.2-2.5-2.5 1.7-.3 2.3-.9 2.5-2.5Z" />
+  ),
+  external: (
+    <>
+      <path d="M14 4h6v6M20 4l-9 9" />
+      <path d="M18 14v6H4V6h6" />
+    </>
+  ),
 };
 export function Icon({ name, size = 16 }: { name: Name; size?: number }) {
   return (

@@ -8,10 +8,10 @@ export function SourceView({
   loading: boolean;
 }) {
   if (loading)
-    return <div className="pane-empty">Loading decompiled source…</div>;
+    return <div className="pane-empty">Loading the rebuilt code…</div>;
   if (!evidence)
     return (
-      <div className="pane-empty">Select a function to read its source.</div>
+      <div className="pane-empty">Pick a function to read its code.</div>
     );
   const source = evidence.source?.trim();
   return (
@@ -26,13 +26,14 @@ export function SourceView({
         </pre>
       ) : (
         <div className="pane-empty">
-          Decompiler source is unavailable for this function.
+          Ghidra could not rebuild code for this function. Open it in full
+          Ghidra to see its machine instructions.
         </div>
       )}
       {(evidence.sourceTruncated || evidence.truncated) && (
         <p className="truncated">
-          This excerpt is truncated. Open the function in Classic for the full
-          view.
+          This code is cut short because the function is long. Open it in full
+          Ghidra to see all of it.
         </p>
       )}
     </div>
