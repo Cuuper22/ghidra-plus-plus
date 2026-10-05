@@ -1,0 +1,76 @@
+name: Ghidra++
+
+on:
+  push:
+    paths:
+      - .github/workflows/ghidra-plus-plus.yml
+      - Ghidra/Features/GhidraPlusPlus/**
+      - docs/**
+      - README.md
+  pull_request:
+    paths:
+      - .github/workflows/ghidra-plus-plus.yml
+      - Ghidra/Features/GhidraPlusPlus/**
+      - docs/**
+      - README.md
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: Ghidra/Features/GhidraPlusPlus/web/package-lock.json
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Build web workspace
+        working-directory: Ghidra/Features/GhidraPlusPlus/web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Test MCP adapter
+        run: python -m unittest discover -s Ghidra/Features/GhidraPlusPlus/tests -p test_mcp.py -v
+
+      - name: Cache Ghidra 12.1.4 archive
+        id: ghidra-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/ghidra_12.1.4_PUBLIC_20260921.zip
+          key: ghidra-12.1.4-public-20260921-${{ runner.os }}
+      - name: Download Ghidra 12.1.4
+        if: steps.ghidra-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/ghidra_12.1.4_PUBLIC_20260921.zip" \
+            https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip
+      - name: Verify and extract Ghidra
+        run: |
+          printf '%s  %s\n' 'ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db' "$RUNNER_TEMP/ghidra_12.1.4_PUBLIC_20260921.zip" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/ghidra"
+          unzip -q "$RUNNER_TEMP/ghidra_12.1.4_PUBLIC_20260921.zip" -d "$RUNNER_TEMP/ghidra"
+      - name: Compile module and run Java core tests
+        run: >-
+          python Ghidra/Features/GhidraPlusPlus/tools/build.py
+          --ghidra "$RUNNER_TEMP/ghidra/ghidra_12.1.4_PUBLIC"
+          --java-home "$JAVA_HOME"
+          --skip-web --test
+      - name: Batch-analyze the example program without a model key
+        run: |
+          GHIDRA="$RUNNER_TEMP/ghidra/ghidra_12.1.4_PUBLIC"
+          "$GHIDRA/ghidra-plus-plus" --workspace "$RUNNER_TEMP/projects" --project CI \
+            --open Ghidra/Features/GhidraPlusPlus/examples/parcel.exe --output "$RUNNER_TEMP/batch"
+          python -c 'import json,sys; d=json.load(open(sys.argv[1]+"/analysis.json")); assert d["analysis"]["status"]=="complete" and len(d["functions"])>=6, d["analysis"]' "$RUNNER_TEMP/batch"
+          test -s "$RUNNER_TEMP/batch/reconstructed.c"
