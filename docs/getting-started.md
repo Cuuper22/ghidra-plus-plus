@@ -33,6 +33,6 @@ Semantic analysis sends bounded excerpts of decompiled C and assembly, function 
 
 Select a function and click **Classic** to open it in Ghidra's CodeBrowser. Renames made in either view appear in the other. Return to the browser through **Tools → Ghidra++ → Open Investigation**. Classic is unavailable when you start with `--headless`.
 
-If you start through `ghidraRun.bat` and use an existing CodeBrowser tool, you may need to enable the plugin once: open **File → Configure**, open the plugin configuration, search for `GhidraPlusPlusPlugin`, and enable it. Then open a program and choose **Tools → Ghidra++ → Open Investigation**.
+The launcher enables the plugin automatically. If you start through `ghidraRun.bat` and use an existing CodeBrowser tool, you may need to enable it once: open **File → Configure…**, choose **Configure All Plugins**, and enable `GhidraPlusPlusPlugin`. Then open a program and choose **Tools → Ghidra++ → Open Investigation**.
 
 For batch use, the launcher accepts `--open PROGRAM --output DIR`; it saves `analysis.json` and `reconstructed.c` in the output directory. See [How It Works](how-it-works.md) for the other launcher options and the local MCP adapter.
