@@ -1,14 +1,33 @@
 import { useState } from "react";
 import { Icon } from "./Icon";
 
+const orders = [
+  { value: "hybrid", label: "Mixed (recommended)", hint: "Alternates between the busiest functions and address order." },
+  { value: "dynamic", label: "Busiest first", hint: "Starts with the functions that are connected to the most others." },
+  { value: "fixed", label: "Address order", hint: "Goes through the program from beginning to end." },
+];
+const details = [
+  { value: "balanced", label: "Normal (recommended)", hint: "Sends a medium-length excerpt of each function." },
+  { value: "fast", label: "Quick look", hint: "Describes only the first 40 functions, using short excerpts." },
+  { value: "exhaustive", label: "Thorough", hint: "Sends longer excerpts. Slower, and sends more text to TypeSafe." },
+];
+
 export function SettingsDialog({
   configured,
   busy,
+  mode,
+  depth,
+  onMode,
+  onDepth,
   onClose,
   onSave,
 }: {
   configured: boolean;
   busy: boolean;
+  mode: string;
+  depth: string;
+  onMode: (value: string) => void;
+  onDepth: (value: string) => void;
   onClose: () => void;
   onSave: (key: string) => Promise<boolean>;
 }) {
@@ -27,7 +46,7 @@ export function SettingsDialog({
         aria-labelledby="settings-title"
       >
         <div className="dialog-heading">
-          <h2 id="settings-title">Model settings</h2>
+          <h2 id="settings-title">Settings</h2>
           <button
             type="button"
             className="icon-button"
@@ -37,13 +56,16 @@ export function SettingsDialog({
             <Icon name="close" />
           </button>
         </div>
+        <h3>Descriptions and name suggestions</h3>
         <p>
-          Semantic analysis uses a TypeSafe model key. The key stays in this
-          Ghidra++ session and is never saved in the project.
+          Ghidra++ can ask TypeSafe, an online service, to say what each
+          function does and to suggest a name when one fits. It sends short
+          excerpts of the rebuilt code and the text found in each function. The
+          program file itself stays on this computer.
         </p>
         <div className="setting-state">
           <Icon name="key" />{" "}
-          {configured ? "Key configured for this session" : "No key configured"}
+          {configured ? "A key is set for this session." : "No key yet."}
         </div>
         <form
           onSubmit={async (event) => {
@@ -59,16 +81,20 @@ export function SettingsDialog({
             value={key}
             onChange={(event) => setKey(event.target.value)}
             autoComplete="off"
-            placeholder={configured ? "Enter a replacement key" : "Enter key"}
+            placeholder={configured ? "Paste a different key" : "Paste your key"}
             autoFocus
           />
+          <p className="field-hint">
+            Ghidra++ keeps the key only while it is running and never saves it
+            in your project. Get a key at{" "}
+            <a href="https://typesafe.ai/" target="_blank" rel="noreferrer">
+              typesafe.ai
+            </a>
+            .
+          </p>
           <div className="dialog-actions">
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={onClose}
-            >
-              Cancel
+            <button className="secondary-button" type="button" onClick={onClose}>
+              Close
             </button>
             <button
               className="primary-button"
@@ -79,6 +105,27 @@ export function SettingsDialog({
             </button>
           </div>
         </form>
+        <details className="advanced">
+          <summary>Advanced: how functions get described</summary>
+          <label htmlFor="describe-order">Order</label>
+          <select id="describe-order" value={mode} onChange={(event) => onMode(event.target.value)}>
+            {orders.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <p className="field-hint">{orders.find((option) => option.value === mode)?.hint}</p>
+          <label htmlFor="describe-detail">Detail</label>
+          <select id="describe-detail" value={depth} onChange={(event) => onDepth(event.target.value)}>
+            {details.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <p className="field-hint">{details.find((option) => option.value === depth)?.hint}</p>
+        </details>
       </div>
     </div>
   );

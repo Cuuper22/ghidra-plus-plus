@@ -4,19 +4,27 @@ Ghidra++ uses Ghidra for program facts, then adds a review layer for semantic ju
 
 ## From binary to investigation
 
-Import creates or reopens a persistent Ghidra project for the binary and runs Ghidra's normal static analysis. The program snapshot includes every discovered function, call edges, and Ghidra types. Selecting a function asks Ghidra for its decompiled C, a bounded assembly excerpt, referenced strings, and callers and callees. The graph and Source views read this program evidence.
+Opening a program creates or reopens a persistent Ghidra project for the binary and runs Ghidra's normal static analysis. The program snapshot includes every discovered function, call edges, and Ghidra types. Selecting a function asks Ghidra for its decompiled C, a bounded assembly excerpt, referenced strings, and callers and callees. The Connections and Code views and the function panel read this program evidence.
 
 The standalone launcher stores the program under a content hash in its chosen project. Importing the same binary again opens the saved program rather than replacing the project. The classic plugin instead attaches to the exact program already open in Ghidra, so navigation and edits refer to the same program.
 
 ## What the model decides
 
-With a key configured, Ghidra++ sends small batches of function evidence to TypeSafe's Jev model. The request includes bounded source and instruction excerpts, signature and type information, call relationships, and referenced strings. Jev selects a role from a fixed list that includes `unknown`. For generic function names, it may choose from names that Ghidra++ derived from the program's calls and strings; it cannot return an unrestricted new name through this path.
+With a key configured, Ghidra++ sends each function's evidence to TypeSafe's Jev model in its own request. The request includes bounded source and instruction excerpts, signature and type information, call relationships, and referenced strings. Jev selects a role from a fixed list of 16 that includes `unknown`. For generic function names such as `FUN_140001000`, it may also choose a name from a short list of common names and names suggested by the program's calls and strings. It cannot return a new name of its own.
 
-A name becomes a proposal only after validation and a confidence threshold. Existing meaningful names are left alone. The inspector shows the role, confidence, and evidence. Applying a proposal changes the Ghidra program in a transaction; Undo restores the previous value. A manual Rename is separate from a model proposal. Ghidra validates changes, and stale proposals are rejected when their underlying evidence changes. Renaming a called function also changes the evidence of its callers. Their pending proposals can become **rejected (evidence changed)**; analyze again to review fresh proposals.
+A name becomes a suggestion only after validation and a confidence threshold. Existing meaningful names are left alone. The function panel turns the role into a plain sentence, shows how sure Jev is, and lists the evidence behind a suggested name. Using a suggestion changes the Ghidra program in a transaction; Undo restores the previous value. A manual Rename is separate from a suggestion. Ghidra validates changes, and a suggestion is set aside when its underlying evidence changes. Renaming a called function also changes the evidence of its callers, so their pending suggestions can become **Out of date**; click **Describe functions** again for fresh ones.
 
-`fast`, `balanced`, and `exhaustive` select how many functions and how much source and assembly context are used. Fast limits semantic analysis to the first 40 ordered functions; the program graph itself still contains all functions. `fixed` visits functions by address, `dynamic` prioritizes highly connected functions, and `hybrid` mixes the two orders. These modes change analysis effort and order, not binary behavior.
+**Settings → Advanced** chooses the depth and order. Detail `fast` (Quick look), `balanced` (Normal), or `exhaustive` (Thorough) selects how many functions and how much source and assembly context are used. Quick look describes only the first 40 functions in order; the program graph itself still contains all functions. Order `fixed` (Address order) visits functions by address, `dynamic` (Busiest first) prioritizes highly connected functions, and `hybrid` (Mixed) alternates between the two. These settings change effort and order, not what the binary does.
 
 Ghidra++ caches model answers against evidence, questions, and model version. Saving writes findings, roles, cache, usage, and review state into the Ghidra program's options alongside normal Ghidra project data. The API key is never serialized.
+
+## How well it works
+
+Jev was checked by hand on three tiny programs built without symbols, with the right answers written down before each run: the two parcel builds and a second program whose functions mostly match no name on Ghidra++'s list. Together they have 21 functions. Thirteen of those functions have a fitting name on the list; Jev suggested 12 of them correctly and made no wrong suggestions. For the other eight it suggested nothing, which is the right answer. Its role was plausible for 18 of the 21 functions. The least reliable roles were for each program's main function, which is why a low-confidence description is shown as a best guess.
+
+The previous version sent six functions in one request. Their evidence mixed: a function that keeps a number between 0 and 100 was called a checksum, the job of its neighbor in the same request. That version suggested 8 correct names and 2 wrong or misleading ones on the same programs. One function per request uses about 10% more input tokens, which is still well under a cent for programs of this size at TypeSafe's listed price in October 2026.
+
+These programs are small, and the name list includes the kinds of utility functions they contain. In a real program, expect a description for most functions and a suggested name for only a few.
 
 ## Local interfaces
 

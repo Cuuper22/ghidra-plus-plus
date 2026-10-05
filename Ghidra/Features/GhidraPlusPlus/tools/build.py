@@ -14,7 +14,7 @@ import zipfile
 
 MODULE = Path(__file__).resolve().parents[1]
 ROOT = MODULE.parents[2]
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 REPOSITORY = 'https://github.com/Cuuper22/ghidra-plus-plus'
 RELATIVE_LINK = re.compile(r'(!?)\[([^\]]*)\]\((?!https?:|#|mailto:)([^)\s]+)\)')
 

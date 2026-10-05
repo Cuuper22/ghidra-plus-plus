@@ -1,38 +1,49 @@
 # Getting started
 
-Ghidra++ helps you inspect a compiled program without running it. The browser workspace is the main path; classic Ghidra remains available for deeper work on the same program.
+Ghidra++ lets you look inside a compiled program, the kind of file you double-click to run, without running it. This page goes from download to your first named function.
 
-## Open the workspace
+## Start Ghidra++
 
-Get the Windows portable ZIP from [v0.1.0](https://github.com/Cuuper22/ghidra-plus-plus/releases/tag/v0.1.0), extract it to a new folder, and double-click `ghidra-plus-plus.bat`. The launcher opens a local browser workspace. If the browser does not open, use the `Ghidra++ workspace:` link printed by the launcher. Keep that link private: its fragment contains a local session token.
+Download the Windows ZIP from the [v0.2.0 release](https://github.com/Cuuper22/ghidra-plus-plus/releases/tag/v0.2.0), extract it to a new folder, and double-click `ghidra-plus-plus.bat`. Your browser opens the workspace. The ZIP includes Ghidra 12.1.4 and Java 25, so there is nothing else to install. Keep the launcher window open while you work.
 
-The Windows ZIP bundles Ghidra 12.1.4 and Java 25. A separate Java installation is not needed. See [Contributing](contributing.md) to build from source.
+If the browser does not open, copy the `Ghidra++ workspace:` link from the launcher window into your browser. Keep that link to yourself: it contains a private key for this session.
 
-The standalone launcher keeps persistent projects in `Documents/Ghidra++ Projects` under your home directory unless you choose another workspace. Click **Save** before leaving. To reopen a program, choose the same file again with **Import**; Ghidra++ restores its saved program and investigation state. Keep the launcher running while you use the browser workspace.
+## Try the example
 
-## Try the parcel example
+1. Click **Try the example**. Ghidra reads `parcel.exe`, a tiny shipping-cost calculator, and splits it into functions. A function is a small piece of a program that does one job.
+2. Start with the function marked **Start** at the top of the list. The **Connections** tab shows which functions it uses. Click any box to open that function.
+3. The panel on the right, **About this function**, lists facts from Ghidra in plain words: how many inputs the function takes, what it gives back, which functions it uses, which functions use it, and any text inside it. Find the function that contains `Parcel priority delivery`.
+4. Open the **Code** tab to read the C code Ghidra rebuilt from the machine code. Names such as `param_1` and `local_18` are placeholders, because the original names are gone.
+5. Click **Rename** and give a function a name that says what it does, such as `read_number`. The new name shows up everywhere at once.
 
-1. Click **Import** and choose `GhidraPlusPlus-examples/parcel.exe` from the extracted portable package. A source checkout includes the same executable in `Ghidra/Features/GhidraPlusPlus/examples/`. Ghidra imports the compiled file and runs static analysis; it does not execute it.
-2. Search the function list or click nodes in **Graph** to follow calls. Select a function to see its address, signature, called names, and referenced strings. In **Source**, read Ghidra's decompiled C for that function.
-3. Find the string `Parcel priority delivery` in the function evidence, then follow the related call path. Use [`parcel.c`](../Ghidra/Features/GhidraPlusPlus/examples/parcel.c) afterward to check what the example actually does. The source is a reference for you, not an input to analysis.
-4. If you configured a model key, review any proposed role or name beside its supporting evidence. Click **Apply** only when the proposal fits. **Undo** reverses an applied proposal. **Save** writes your changes and Ghidra++ state into the Ghidra project.
+The example's original source, [`parcel.c`](../Ghidra/Features/GhidraPlusPlus/examples/parcel.c), is in the `GhidraPlusPlus-examples` folder so you can check your guesses afterwards. Ghidra++ never reads it.
 
-You can also build an optimized version of the example and compare it with the first build to see how optimization changes the decompiled view.
+To look at your own program, click **Open a program**, or **Open program** in the toolbar, and pick an `.exe` or `.dll` file. Ghidra++ never runs it.
 
-## Enable semantic analysis
+## Turn on descriptions and name suggestions
 
-Static analysis, the graph, and decompiled C need no API key. The banner reads **Name and role proposals are off. Add a TypeSafe API key to turn them on.** Click **Add API key**, or open Model settings, and enter your TypeSafe key. You can also set `TYPESAFE_API_KEY` before starting Ghidra++. A key entered in the workspace lasts only for that running process; it is not stored in the project. The environment variable is read when the process starts.
+Everything above works without an account. With a [TypeSafe](https://typesafe.ai/) API key, Ghidra++ also writes a one-line description of each function and suggests a name when a common one fits.
 
-After a key is configured, a new import starts semantic analysis after Ghidra finishes static analysis. For an already open program, choose a mode and depth, then click **Analyze**. **Pause** stops at an analysis boundary; **Resume** continues. The progress message and errors appear in the workspace. If a name proposal says **rejected (evidence changed)** after another rename, run **Analyze** again to get proposals based on the current names.
+Click **Turn them on** in the blue banner, or the gear button, paste your key, and click **Save key**. Then click **Describe functions**. Programs you open later are described automatically. You can also set `TYPESAFE_API_KEY` before starting Ghidra++. The key lasts until Ghidra++ closes and is never saved in your project.
 
-Semantic analysis sends bounded excerpts of decompiled C and assembly, function metadata, call relationships, and referenced strings to [TypeSafe's API](https://docs.typesafe.ai/api). The imported binary and Ghidra project stay local. Check [TypeSafe's site](https://typesafe.ai/) for current pricing and account terms before using the service.
+Each description says how sure TypeSafe is: **Very likely**, **Probably**, or **Not sure**. A description it is not sure about is shown as a **Best guess**. A small sparkle in the function list marks functions with a suggested name. Open one, read **Why this name?**, and click **Use this name** if it fits. **Undo** puts the old name back. Treat suggestions as hints and check them in the Code tab.
 
-## Export or use classic Ghidra
+TypeSafe picks from 16 kinds of jobs and a short list of common names, so many functions get a description and no suggested name. Name those yourself. After you rename a function, suggestions for the functions that use it can become **Out of date**; click **Describe functions** again for fresh ones.
 
-**Export → Decompiled source** downloads a C projection from Ghidra's decompiler. **Export → Analysis snapshot** downloads JSON with the current graph, findings, and progress. **Save** is the action that persists the actual Ghidra project; the JSON snapshot is not a `.gpr` project archive.
+To describe functions, Ghidra++ sends short excerpts of each function's rebuilt code and assembly, its details, and the text inside it to [TypeSafe's API](https://docs.typesafe.ai/api). The program file and your project stay on your computer. Check TypeSafe's site for pricing and terms.
 
-Select a function and click **Classic** to open it in Ghidra's CodeBrowser. Renames made in either view appear in the other. Return to the browser through **Tools → Ghidra++ → Open Investigation**. Classic is unavailable when you start with `--headless`.
+**Settings → Advanced** changes the order functions are described in and how much code is sent for each one. The defaults suit most programs.
 
-The launcher enables the plugin automatically. If you start through `ghidraRun.bat` and use an existing CodeBrowser tool, you may need to enable it once: open **File → Configure…**, choose **Configure All Plugins**, and enable `GhidraPlusPlusPlugin`. Then open a program and choose **Tools → Ghidra++ → Open Investigation**.
+## Save, export, and come back later
 
-For batch use, the launcher accepts `--open PROGRAM --output DIR`; it saves `analysis.json` and `reconstructed.c` in the output directory. See [How It Works](how-it-works.md) for the other launcher options and the local MCP adapter.
+Names you set or accept are saved as you go, and **Save** writes everything to the Ghidra project. To pick up later, start Ghidra++ and open the same file again; your names and descriptions come back. Projects live in `Documents/Ghidra++ Projects` under your home folder.
+
+**Export → Rebuilt code** downloads every function as one `.c` file. **Export → Analysis report** downloads the functions, descriptions, and names as JSON. The rebuilt code helps you read the program; it is not the original source and may not compile.
+
+## Go deeper in full Ghidra
+
+Click **Open in full Ghidra** in a function's panel to open it in Ghidra's classic CodeBrowser, with all of Ghidra's tools. Both windows work on the same program, so a rename in one shows up in the other. To come back, choose **Tools → Ghidra++ → Open Investigation**. Full Ghidra is unavailable when Ghidra++ was started with `--headless`.
+
+The launcher enables the Ghidra++ plugin for you. If you start Ghidra through `ghidraRun.bat` instead and the menu entry is missing, open **File → Configure…**, choose **Configure All Plugins**, and enable `GhidraPlusPlusPlugin`.
+
+The **?** button explains the main terms and turns the tips on or off. For batch use, the launcher accepts `--open PROGRAM --output DIR` and writes `analysis.json` and `reconstructed.c`. [How It Works](how-it-works.md) covers the other options and the MCP adapter for AI agents.

@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 LEGACY_VERSION = "2025-11-25"
 MODERN_VERSION = "2026-07-28"
-SERVER_INFO = {"name": "ghidraplus", "version": "0.1.0"}
+SERVER_INFO = {"name": "ghidraplus", "version": "0.2.0"}
 MAX_LINE = 2 * 1024 * 1024
 MAX_RESPONSE = 64 * 1024 * 1024
 
