@@ -27,8 +27,13 @@ import org.junit.Test;
 import generic.jar.ResourceFile;
 import generic.test.AbstractGenericTest;
 import ghidra.framework.Application;
+import ghidra.program.database.dtarchive.DataTypeArchiveFactory;
 import ghidra.program.model.data.*;
-import ghidra.program.model.data.StandAloneDataTypeManager.ArchiveWarning;
+import ghidra.program.model.dtarchive.ArchiveWarning;
+import ghidra.program.model.dtarchive.FileDataTypeArchive;
+import ghidra.util.exception.CancelledException;
+import ghidra.util.exception.VersionException;
+import ghidra.util.task.TaskMonitor;
 
 public class DataTypeArchiveIDTest extends AbstractGenericTest {
 
@@ -53,34 +58,34 @@ public class DataTypeArchiveIDTest extends AbstractGenericTest {
 			Map.entry("typeinfo/golang/golang_1.20_anybit_any.gdt", "3533817003441909616"),
 			Map.entry("typeinfo/golang/golang_1.21_anybit_any.gdt", "3574190573109087960"),
 			Map.entry("typeinfo/golang/golang_1.22_anybit_any.gdt", "3596108668808850319"),
-			Map.entry("typeinfo/golang/golang_1.23_anybit_any.gdt", "3629085086035854850"),
-			Map.entry("typeinfo/rust/rust-common.gdt", "3557867258392862055"));
+			Map.entry("typeinfo/golang/golang_1.23_anybit_any.gdt", "3629085086035854850"));
 	//@formatter:on
 
 	private Map<ResourceFile, String> getCurrentGdts() {
 		return Application.findFilesByExtensionInApplication(".gdt")
 				.stream()
-				.filter(f -> f.getAbsolutePath().contains("/data/typeinfo/"))
+				.filter(f -> f.getAbsolutePath().replace('\\', '/').contains("/data/typeinfo/"))
 				.collect(Collectors.toMap(Function.identity(), f -> getGdtUniversalId(f)));
 	}
 
 	private String getGdtUniversalId(ResourceFile gdtFile) {
-		FileDataTypeManager dtm = null;
+		FileDataTypeArchive archive = null;
 		try {
-			dtm = FileDataTypeManager.openFileArchive(gdtFile, false);
-			assertEquals(dtm.getWarningMessage(true), ArchiveWarning.NONE, dtm.getWarning());
-			return dtm.getUniversalID().toString();
+			archive = DataTypeArchiveFactory.openReadOnly(gdtFile, this, TaskMonitor.DUMMY);
+			assertEquals(archive.getWarningMessage(true), ArchiveWarning.NONE,
+				archive.getWarning());
+			return archive.getUniversalID().toString();
 		}
-		catch (IOException e) {
+		catch (IOException | VersionException | CancelledException e) {
 			return "failed to read " + gdtFile.getName();
 		}
 		finally {
-			dtm.close();
+			archive.release(this);
 		}
 	}
 
 	private String getGdtRelativePath(ResourceFile gdtFile) {
-		String path = gdtFile.getAbsolutePath();
+		String path = gdtFile.getAbsolutePath().replace('\\', '/');
 		int ix = path.indexOf("/typeinfo/");
 		path = path.substring(ix + 1);
 		return path;
@@ -127,10 +132,12 @@ public class DataTypeArchiveIDTest extends AbstractGenericTest {
 	}
 
 	@Test
-	public void spotCheckWindowsVS12_32() throws IOException {
+	public void spotCheckWindowsVS12_32() throws Exception {
 		ResourceFile gdtFile = Application.getModuleDataFile(WIN_VS12_32_GDT_PATH);
-		FileDataTypeManager dtm = FileDataTypeManager.openFileArchive(gdtFile, false);
-		assertEquals(ArchiveWarning.NONE, dtm.getWarning());
+		FileDataTypeArchive archive =
+			DataTypeArchiveFactory.openReadOnly(gdtFile, this, TaskMonitor.DUMMY);
+		DataTypeManager dtm = archive.getDataTypeManager();
+		assertEquals(ArchiveWarning.NONE, archive.getWarning());
 		try {
 			DataType dt = dtm.getDataType("/winsock.h/fd_set");
 			assertNotNull(dt);
@@ -138,15 +145,17 @@ public class DataTypeArchiveIDTest extends AbstractGenericTest {
 			verifyArchive(dt, WIN_VS12_32_GDT_PATH);
 		}
 		finally {
-			dtm.close();
+			archive.release(this);
 		}
 	}
 
 	@Test
-	public void spotCheckWindowsVS12_64() throws IOException {
+	public void spotCheckWindowsVS12_64() throws Exception {
 		ResourceFile gdtFile = Application.getModuleDataFile(WIN_VS12_64_GDT_PATH);
-		FileDataTypeManager dtm = FileDataTypeManager.openFileArchive(gdtFile, false);
-		assertEquals(ArchiveWarning.NONE, dtm.getWarning());
+		FileDataTypeArchive archive =
+			DataTypeArchiveFactory.openReadOnly(gdtFile, this, TaskMonitor.DUMMY);
+		DataTypeManager dtm = archive.getDataTypeManager();
+		assertEquals(ArchiveWarning.NONE, archive.getWarning());
 		try {
 			DataType dt = dtm.getDataType("/winsock.h/fd_set");
 			assertNotNull(dt);
@@ -154,15 +163,17 @@ public class DataTypeArchiveIDTest extends AbstractGenericTest {
 			verifyArchive(dt, WIN_VS12_64_GDT_PATH);
 		}
 		finally {
-			dtm.close();
+			archive.release(this);
 		}
 	}
 
 	@Test
-	public void spotCheckGenericCLib32() throws IOException {
+	public void spotCheckGenericCLib32() throws Exception {
 		ResourceFile gdtFile = Application.getModuleDataFile(GENERIC_CLIB_32_GDT_PATH);
-		FileDataTypeManager dtm = FileDataTypeManager.openFileArchive(gdtFile, false);
-		assertEquals(ArchiveWarning.NONE, dtm.getWarning());
+		FileDataTypeArchive archive =
+			DataTypeArchiveFactory.openReadOnly(gdtFile, this, TaskMonitor.DUMMY);
+		DataTypeManager dtm = archive.getDataTypeManager();
+		assertEquals(ArchiveWarning.NONE, archive.getWarning());
 		try {
 			DataType dt = dtm.getDataType("/select.h/fd_set");
 			assertNotNull(dt);
@@ -170,15 +181,18 @@ public class DataTypeArchiveIDTest extends AbstractGenericTest {
 			verifyArchive(dt, GENERIC_CLIB_32_GDT_PATH);
 		}
 		finally {
-			dtm.close();
+			archive.release(this);
 		}
 	}
 
 	@Test
-	public void spotCheckGenericCLib64() throws IOException {
+	public void spotCheckGenericCLib64() throws Exception {
 		ResourceFile gdtFile = Application.getModuleDataFile(GENERIC_CLIB_64_GDT_PATH);
-		FileDataTypeManager dtm = FileDataTypeManager.openFileArchive(gdtFile, false);
-		assertEquals(ArchiveWarning.NONE, dtm.getWarning());
+		FileDataTypeArchive archive =
+			DataTypeArchiveFactory.openReadOnly(gdtFile, this, TaskMonitor.DUMMY);
+		DataTypeManager dtm = archive.getDataTypeManager();
+
+		assertEquals(ArchiveWarning.NONE, archive.getWarning());
 		try {
 			DataType dt = dtm.getDataType("/select.h/fd_set");
 			assertNotNull(dt);
@@ -186,15 +200,18 @@ public class DataTypeArchiveIDTest extends AbstractGenericTest {
 			verifyArchive(dt, GENERIC_CLIB_64_GDT_PATH);
 		}
 		finally {
-			dtm.close();
+			archive.release(this);
 		}
 	}
 
 	@Test
-	public void spotCheckMacOS10_9() throws IOException {
+	public void spotCheckMacOS10_9() throws Exception {
 		ResourceFile gdtFile = Application.getModuleDataFile(MAC_OS_10_9_GDT_PATH);
-		FileDataTypeManager dtm = FileDataTypeManager.openFileArchive(gdtFile, false);
-		assertEquals(ArchiveWarning.NONE, dtm.getWarning());
+		FileDataTypeArchive archive =
+			DataTypeArchiveFactory.openReadOnly(gdtFile, this, TaskMonitor.DUMMY);
+		DataTypeManager dtm = archive.getDataTypeManager();
+
+		assertEquals(ArchiveWarning.NONE, archive.getWarning());
 		try {
 			DataType dt = dtm.getDataType("/_fd_def.h/fd_set");
 			assertNotNull(dt);
@@ -202,7 +219,7 @@ public class DataTypeArchiveIDTest extends AbstractGenericTest {
 			verifyArchive(dt, MAC_OS_10_9_GDT_PATH);
 		}
 		finally {
-			dtm.close();
+			archive.release(this);
 		}
 	}
 

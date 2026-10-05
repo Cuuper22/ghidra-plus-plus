@@ -100,9 +100,10 @@ abstract public class CompositeEditorModel<T extends Composite> extends Composit
 		originalDataTypePath = originalComposite.getDataTypePath();
 		currentName = originalComposite.getName();
 
-		// Use temporary standalone view datatype manager
-		viewDTM = new CompositeViewerDataTypeManager<>(viewDTM.getName(),
-			viewDTM.getResolvedViewComposite(), this::componentEdited, this::restoreEditor);
+		// Use temporary view datatype manager
+		T composite = viewDTM.getResolvedViewComposite();
+		viewDTM = CompositeViewerDataTypeManager.createUndoableInstance(composite, this::componentEdited,
+			this::restoreEditor);
 
 		viewComposite = viewDTM.getResolvedViewComposite();
 
@@ -141,7 +142,7 @@ abstract public class CompositeEditorModel<T extends Composite> extends Composit
 		}
 
 		if (dataType.isDeleted()) {
-			// This can occur when mayny events get lumped together and a change event triggers
+			// This can occur when many events get lumped together and a change event triggers
 			// a delayed reload prior to datatype removal and its event
 			if (dataType == originalComposite) {
 				// Re-route to dataTypeRemoved callback after restoring listener.
@@ -225,10 +226,9 @@ abstract public class CompositeEditorModel<T extends Composite> extends Composit
 			viewDTM = null;
 		}
 
-		// Use temporary standalone view datatype manager
-		viewDTM =
-			new CompositeViewerDataTypeManager<>(originalComposite.getDataTypeManager().getName(),
-				originalComposite, this::componentEdited, this::restoreEditor);
+		// Use temporary stand-alone view datatype archive
+		viewDTM = CompositeViewerDataTypeManager.createUndoableInstance(originalComposite,
+			this::componentEdited, this::restoreEditor);
 
 		viewComposite = viewDTM.getResolvedViewComposite();
 
@@ -1478,14 +1478,6 @@ abstract public class CompositeEditorModel<T extends Composite> extends Composit
 	 */
 	protected boolean bitfieldsSupported() {
 		return (viewComposite instanceof Structure) || (viewComposite instanceof Union);
-	}
-
-	/**
-	 * Get the composite edtor's datatype manager
-	 * @return composite edtor's datatype manager
-	 */
-	public CompositeViewerDataTypeManager<T> getViewDataTypeManager() {
-		return viewDTM;
 	}
 
 }

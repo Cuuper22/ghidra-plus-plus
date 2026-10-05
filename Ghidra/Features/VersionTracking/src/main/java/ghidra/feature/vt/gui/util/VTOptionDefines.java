@@ -36,6 +36,8 @@ public class VTOptionDefines {
 	public static boolean DEFAULT_OPTION_FOR_PARAMETER_NAMES_REPLACE_IF_SAME_PRIORITY = false;
 	public static ReplaceDataChoices DEFAULT_OPTION_FOR_DATA_MATCH_DATA_TYPE =
 		ReplaceDataChoices.REPLACE_UNDEFINED_DATA_ONLY;
+	public static DataTypeConflictChoices DEFAULT_OPTION_FOR_DATA_TYPE_CONFLICT_HANDLER =
+		DataTypeConflictChoices.USE_EXISTING;
 	public static FunctionNameChoices DEFAULT_OPTION_FOR_FUNCTION_NAME =
 		FunctionNameChoices.ADD_AS_PRIMARY;
 	public static FunctionSignatureChoices DEFAULT_OPTION_FOR_FUNCTION_SIGNATURE =
@@ -69,6 +71,7 @@ public class VTOptionDefines {
 		CommentChoices.APPEND_TO_EXISTING;
 
 	public static boolean DEFAULT_OPTION_FOR_NAMESPACE_FUNCTIONS = false;
+	public static boolean DEFAULT_OPTION_FOR_USE_EMPTY_STRUCTURES = false;
 
 	public static final String FUNCTION_NAME = APPLY_MARKUP_OPTIONS_NAME + ".Function Name";
 	public static final String FUNCTION_RETURN_TYPE = APPLY_MARKUP_OPTIONS_NAME +
@@ -83,6 +86,8 @@ public class VTOptionDefines {
 	public static final String POST_COMMENT = APPLY_MARKUP_OPTIONS_NAME + ".Post Comment";
 	public static final String DATA_MATCH_DATA_TYPE = APPLY_MARKUP_OPTIONS_NAME +
 		".Data Match Data Type";
+	public static final String DATA_TYPE_CONFLICT_HANDLER = APPLY_MARKUP_OPTIONS_NAME +
+		".Data Type Conflict Handler";
 	public static final String FUNCTION_SIGNATURE = APPLY_MARKUP_OPTIONS_NAME +
 		".Function Signature";
 	public static final String CALLING_CONVENTION = APPLY_MARKUP_OPTIONS_NAME +
@@ -114,7 +119,12 @@ public class VTOptionDefines {
 		APPLY_MARKUP_OPTIONS_NAME + ".Replace Namespace";
 
 	public static final String USE_NAMESPACE_TOOLTIP =
-		"Apply the non-Global source namespace to the destination function.";
+		"Apply the non-Global source namespace to the destination function";
+
+	public static final String USE_EMPTY_COMPOSITES =
+		APPLY_MARKUP_OPTIONS_NAME + ".Use Emtpy Composite Types";
+	public static final String USE_EMPTY_COMPOSITES_TOOLTIP =
+		"Create empty composite data types in destination function signatures";
 
 	// Auto VT Options
 	public static final String AUTO_VT_OPTIONS_NAME = "Auto Version Tracking Options";

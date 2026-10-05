@@ -25,6 +25,7 @@ import org.junit.Test;
 
 import ghidra.app.util.cparser.C.CParser;
 import ghidra.app.util.cparser.C.ParseException;
+import ghidra.program.database.data.TransientDataTypeManager;
 import ghidra.program.model.data.*;
 import ghidra.program.model.data.Enum;
 import ghidra.program.model.lang.CompilerSpec;
@@ -42,52 +43,149 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 
 		DataType pdt = parser.parse("typedef long int32_t;");
 		assertTrue(pdt != null);
-		assertTrue(pdt instanceof TypeDef);
+		assertTrue(pdt instanceof Int32TDataType);
 		assertTrue(pdt.getName().equals("int32_t"));
 		DataType dt = parser.getDataTypeManager().getDataType("/int32_t");
 		assertTrue(dt != null);
-		assertTrue(dt instanceof TypeDef);
-		
+		assertTrue(dt instanceof Int32TDataType);
 		dt = parser.parse("struct mystruct {" +
-                     "    int field1;" +
-                     "    char field2;" +
-                     " };");
-		
+			"    int32_t field1;" +
+			"    char field2;" +
+			" };");
+
 		assertTrue(dt != null);
 		assertTrue(dt instanceof Structure);
 		Structure sdt = (Structure) dt;
 		DataTypeComponent comp = sdt.getComponent(0);
 		assertEquals("field1", comp.getFieldName());
-		assertEquals(comp.getDataType().getName(),"int");
+		assertEquals("int32_t", comp.getDataType().getName());
 		comp = sdt.getComponent(1);
 		assertEquals("field2", comp.getFieldName());
-		assertEquals(comp.getDataType().getName(),"char");
+		assertEquals(comp.getDataType().getName(), "char");
+	}
+
+	@Test
+	public void testReplacement1() throws Exception {
+		CParser parser = new CParser();
+
+		DataType pdt = parser.parse("typedef long __int32_t;");
+		assertTrue(pdt instanceof TypeDef);
+		assertEquals("typedef __int32_t int32_t", pdt.toString());
+
+		pdt = parser.parse("typedef __int32_t int32_t;");
+		assertTrue(pdt instanceof Int32TDataType);
+		assertTrue(pdt.getName().equals("int32_t"));
+		assertEquals("int32_t", pdt.toString());
+
+		DataType dt = parser.getDataTypeManager().getDataType("/int32_t");
+		assertTrue(dt != null);
+		assertTrue(dt instanceof Int32TDataType);
+
+		dt = parser.parse("struct mystruct {" +
+			"    int32_t field1;" +
+			"    char field2;" +
+			" };");
+
+		assertTrue(dt != null);
+		assertTrue(dt instanceof Structure);
+		Structure sdt = (Structure) dt;
+		DataTypeComponent comp = sdt.getComponent(0);
+		assertEquals("field1", comp.getFieldName());
+		assertEquals("int32_t", comp.getDataType().getName());
+		comp = sdt.getComponent(1);
+		assertEquals("field2", comp.getFieldName());
+		assertEquals(comp.getDataType().getName(), "char");
+	}
+
+	@Test
+	public void testReplacement2() throws Exception {
+		CParser parser = new CParser();
+
+		DataType pdt = parser.parse("typedef long int32_t;");
+		assertTrue(pdt instanceof Int32TDataType);
+		assertTrue(pdt.getName().equals("int32_t"));
+		assertEquals("int32_t", pdt.toString());
+
+		pdt = parser.parse("typedef int32_t __int32_t;");
+		assertTrue(pdt instanceof TypeDef);
+		assertEquals("typedef __int32_t int32_t", pdt.toString());
+		assertTrue(pdt.getName().equals("__int32_t"));
+		DataType dt = parser.getDataTypeManager().getDataType("/__int32_t");
+		assertTrue(dt != null);
+		assertTrue(dt instanceof TypeDef);
+
+		dt = parser.parse("struct mystruct {" +
+			"    __int32_t field1;" +
+			"    char field2;" +
+			" };");
+
+		assertTrue(dt != null);
+		assertTrue(dt instanceof Structure);
+		Structure sdt = (Structure) dt;
+		DataTypeComponent comp = sdt.getComponent(0);
+		assertEquals("field1", comp.getFieldName());
+		assertEquals("__int32_t", comp.getDataType().getName());
+		comp = sdt.getComponent(1);
+		assertEquals("field2", comp.getFieldName());
+		assertEquals(comp.getDataType().getName(), "char");
+	}
+
+	@Test
+	public void testLongInt() throws Exception {
+		CParser parser;
+
+		parser = new CParser(); // uses default data organization (i.e., x86-32)
+		DataType pdt32 = parser.parse("typedef unsigned long int u_int32_t;");
+
+		assertTrue(pdt32 instanceof TypeDef);
+		assertTrue(pdt32.getName().equals("u_int32_t"));
+		assertEquals(4, pdt32.getLength());
+
+		// replaced with `typedef uint32_t u_int32_t`
+		DataType dt = ((TypeDef) pdt32).getBaseDataType();
+		assertTrue(dt instanceof UInt32TDataType);
+
+		dt = parser.getDataTypeManager().getDataType("/u_int32_t");
+		assertTrue(dt instanceof TypeDef);
+		assertEquals(4, dt.getLength());
+		dt = parser.getDataTypeManager().getDataType("/uint32_t");
+		assertTrue(dt instanceof UInt32TDataType);
+		assertEquals(4, dt.getLength());
+
+		parser = new CParser();
+		pdt32 = parser.parse("typedef unsigned long int foo_t;");
+		assertTrue(pdt32 instanceof TypeDef);
+		assertTrue(pdt32.getName().equals("foo_t"));
+		assertEquals(4, pdt32.getLength());
+
+		dt = parser.getDataTypeManager().getDataType("/foo_t");
+		assertTrue(dt instanceof TypeDef);
+		assertEquals(4, dt.getLength());
 	}
 
 	@Test
 	public void testLongLong() throws Exception {
 		CParser parser;
 
-		parser = new CParser();
-		DataType pdt64 = parser.parse("typedef unsigned long int uint64_t;");
+		parser = new CParser(); // uses default data organization (i.e., x86-32)
+		DataType pdt64 = parser.parse("typedef unsigned long long uint64_t;");
 
-		assertTrue(pdt64 != null);
-		assertTrue(pdt64 instanceof TypeDef);
+		assertTrue(pdt64 instanceof UInt64TDataType);
 		assertTrue(pdt64.getName().equals("uint64_t"));
-		assertEquals(4, pdt64.getLength());
+		assertEquals(8, pdt64.getLength());
 
 		DataType dt = parser.getDataTypeManager().getDataType("/uint64_t");
-		assertTrue(dt != null);
-		assertTrue(dt instanceof TypeDef);
+		assertTrue(dt instanceof UInt64TDataType);
+		assertEquals(8, dt.getLength());
 
 		parser = new CParser();
-		DataType pdt32 = parser.parse("typedef unsigned long long int uint64_t;");
-		assertTrue(pdt32 != null);
-		assertTrue(pdt32 instanceof TypeDef);
-		assertTrue(pdt32.getName().equals("uint64_t"));
-		assertEquals(8, pdt32.getLength());
+		pdt64 = parser.parse("typedef unsigned long long int uint64_t;");
+		assertTrue(pdt64 instanceof UInt64TDataType);
+		assertTrue(pdt64.getName().equals("uint64_t"));
+		assertEquals(8, pdt64.getLength());
+
 	}
-	
+
 	@Test
 	public void testTypedef() throws Exception {
 		CParser parser;
@@ -98,9 +196,9 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		assertTrue(tdDt != null);
 		assertTrue(tdDt instanceof TypeDef);
 		System.out.println(tdDt.getPathName());
-		System.out.println(((TypeDef)tdDt).getDataType().getPathName());
+		System.out.println(((TypeDef) tdDt).getDataType().getPathName());
 		assertEquals("foo", tdDt.getName());
-		assertEquals("foo.conflict *", ((TypeDef)tdDt).getDataType().getName());
+		assertEquals("foo.conflict *", ((TypeDef) tdDt).getDataType().getName());
 		assertEquals(4, tdDt.getLength());
 
 		DataType dt = parser.getDataTypeManager().getDataType("/foo");
@@ -108,44 +206,41 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		assertTrue(dt instanceof TypeDef);
 
 	}
-	
+
 	@Test
 	public void testWcharT() throws Exception {
 
 		DataType dt;
 		Structure sdt;
 		DataTypeComponent comp;
-		
+
 		CParser parser;
-		
-		parser = new CParser();
-		dt = parser.parse("typedef int wchar_t;");
-		
+		parser = new CParser(); // uses default data organization (i.e., x86-32)
+		dt = parser.parse("typedef short wchar_t;");
 		assertTrue(dt instanceof WideCharDataType);
 
 		parser = new CParser();
 		dt = parser.parse("struct mystruct {" +
-						  "    wchar_t defined_wchar_t;" +
-				          "};");
+			"    wchar_t defined_wchar_t;" +
+			"};");
 
 		sdt = (Structure) dt;
 		comp = sdt.getComponent(0);
 		assertTrue(comp.getDataType() instanceof WideCharDataType);
-		
+
 		parser = new CParser();
 		dt = parser.parse("typedef int wchar_t;" +
-		                  "struct mystruct {" +
-				          "    wchar_t defined_wchar_t;" +
-		                  "};");
-		
+			"struct mystruct {" +
+			"    wchar_t defined_wchar_t;" +
+			"};");
+
 		sdt = (Structure) dt;
 		comp = sdt.getComponent(0);
 		assertTrue(comp.getDataType() instanceof WideCharDataType);
-		
 
 		parser = new CParser();
 		dt = parser.parse("typedef short wchar_t;" +
-                                   "  typedef wchar_t foo;");
+			"  typedef wchar_t foo;");
 
 		assertTrue(dt != null);
 		assertTrue(dt instanceof TypeDef);
@@ -165,7 +260,7 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 	@Test
 	public void testParseDataType_NoSubArchive() throws Exception {
 
-		DataTypeManager primary = new StandAloneDataTypeManager("primary");
+		DataTypeManager primary = new TransientDataTypeManager("primary");
 
 		DataTypeManager[] subs = new DataTypeManager[] {};
 
@@ -182,7 +277,7 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 	@Test
 	public void testParseDataType_WithSubArchive() throws Exception {
 
-		DataTypeManager primary = new StandAloneDataTypeManager("primary");
+		DataTypeManager primary = new TransientDataTypeManager("primary");
 
 		DataTypeManager[] subs = new DataTypeManager[] { createDataTypeManagerWithABar() };
 
@@ -192,7 +287,8 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 	}
 
 	private DataTypeManager createDataTypeManagerWithABar() {
-		DataTypeManager dtm = new StandAloneDataTypeManager("sub 0");
+
+		DataTypeManager dtm = new TransientDataTypeManager("sub 0");
 
 		int txID = dtm.startTransaction("Add DataType");
 		try {
@@ -234,7 +330,7 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 
 		String parseMessages = parser.getParseMessages();
 		System.out.println(parseMessages);
-		
+
 		DataType dt;
 		DataType pointedToDT;
 		ParameterDefinition[] funcArgs;
@@ -243,18 +339,20 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 
 		dt = dtMgr.getDataType(new CategoryPath("/"), "pragmaPassed");
 		assertNotNull("Structure after pragma not parsed", dt);
-		
-		assertTrue("Duplicate ENUM message missing", parseMessages.contains("duplicate enum value: options_enum : PLUS_SET : 16"));
-		
-		assertTrue("Static assert fail missing", parseMessages.contains("Static_Assert possibly failed  \"\"math fail!\"\""));
-		
-		assertTrue("Static assert fail missing", parseMessages.contains("Static_Assert possibly failed  \"\"1 + 1 == 3, fail!\"\""));
-		
+
+		assertTrue("Duplicate ENUM message missing",
+			parseMessages.contains("duplicate enum value: options_enum : PLUS_SET : 16"));
+
+		assertTrue("Static assert fail missing",
+			parseMessages.contains("Static_Assert possibly failed  \"\"math fail!\"\""));
+
+		assertTrue("Static assert fail missing",
+			parseMessages.contains("Static_Assert possibly failed  \"\"1 + 1 == 3, fail!\"\""));
+
 		dt = dtMgr.getDataType(new CategoryPath("/"), "_IO_FILE_complete");
 		Structure sldt = (Structure) dt;
 		DataTypeComponent data3 = sldt.getComponent(2);
 		assertEquals("Computed Array correct", 40, data3.getLength());
-
 
 		dt = dtMgr.getDataType(new CategoryPath("/"), "fnptr"); // typedef int (*fnptr)(struct fstruct);
 		// "fnptr" named typedef of pointer to "int fnptr(fstruct )" --- should an anonymous function name be used?
@@ -267,8 +365,7 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		funcArgs = funcDef.getArguments();
 		assertTrue("struct fstruct", funcArgs[0].getDataType() instanceof Structure);
 		str = funcDef.getPrototypeString();
-		assertEquals("signature not correct", "int fnptr(fstruct )", replaceAnonFuncName(str));		
-		
+		assertEquals("signature not correct", "int fnptr(fstruct )", replaceAnonFuncName(str));
 
 		// Test 
 		dt = dtMgr.getDataType(new CategoryPath("/functions"), "_Once"); // void __cdecl _Once(_Once_t *, void (__cdecl *)(void));
@@ -276,13 +373,14 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		assertTrue("_Once function definition", dt instanceof FunctionDefinition);
 		funcDef = (FunctionDefinition) dt;
 		str = funcDef.getPrototypeString();
-		assertEquals("signature not correct", "void _Once(_Once_t * , _func_anon_ * )", replaceAnonFuncName(str));
+		assertEquals("signature not correct", "void _Once(_Once_t * , _func_anon_ * )",
+			replaceAnonFuncName(str));
 		assertEquals("calling convention _Once", "__cdecl", funcDef.getCallingConventionName());
 		funcArgs = funcDef.getArguments();
-		assertTrue("struct fstruct", funcArgs[0].getDataType() instanceof Pointer);	
+		assertTrue("struct fstruct", funcArgs[0].getDataType() instanceof Pointer);
 		assertTrue("ptr", funcArgs[1].getDataType() instanceof Pointer);
 		pointedToDT = ((Pointer) funcArgs[1].getDataType()).getDataType();
-		assertTrue("ptr not to a function", pointedToDT instanceof FunctionDefinition);	
+		assertTrue("ptr not to a function", pointedToDT instanceof FunctionDefinition);
 		funcDef = (FunctionDefinition) pointedToDT;
 		assertEquals("calling convention _Once", "__cdecl", funcDef.getCallingConventionName());
 		str = funcDef.getPrototypeString();
@@ -296,7 +394,7 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		assertEquals("calling convention _Twice", "__stdcall", funcDef.getCallingConventionName());
 		funcArgs = funcDef.getArguments();
 		pointedToDT = ((Pointer) funcArgs[0].getDataType()).getDataType();
-		assertTrue("ptr not to a function", pointedToDT instanceof FunctionDefinition);	
+		assertTrue("ptr not to a function", pointedToDT instanceof FunctionDefinition);
 		funcDef = (FunctionDefinition) pointedToDT;
 		assertEquals("calling convention _Once", "__cdecl", funcDef.getCallingConventionName());
 		str = funcDef.getPrototypeString();
@@ -310,12 +408,12 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		assertEquals("calling convention _Thrice", "unknown", funcDef.getCallingConventionName());
 		funcArgs = funcDef.getArguments();
 		pointedToDT = ((Pointer) funcArgs[0].getDataType()).getDataType();
-		assertTrue("ptr not to a function", pointedToDT instanceof FunctionDefinition);	
+		assertTrue("ptr not to a function", pointedToDT instanceof FunctionDefinition);
 		funcDef = (FunctionDefinition) pointedToDT;
 		assertEquals("calling convention _Once", "__cdecl", funcDef.getCallingConventionName());
 		str = funcDef.getPrototypeString();
 		assertEquals("signature not correct", "void _func_anon_(void)", replaceAnonFuncName(str));
-		
+
 		dt = dtMgr.getDataType(new CategoryPath("/"), "UShortInt");
 		assertTrue(dt instanceof TypeDef);
 		assertTrue("signature not correct",
@@ -387,14 +485,14 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		dt = dtMgr.getDataType(new CategoryPath("/functions"), "gcc_exit");
 		assertTrue("not a function", dt instanceof FunctionDefinition);
 		assertTrue("Caller should noreturn", ((FunctionDefinition) dt).hasNoReturn());
-		
+
 		dt = dtMgr.getDataType(new CategoryPath("/"), "UINT2");
 		assertTrue(dt instanceof TypeDef);
 		assertEquals("ushort", ((TypeDef) dt).getBaseDataType().getName());
 
 		dt = dtMgr.getDataType("/int32_t");
 		assertTrue(dt != null);
-		assertTrue(dt instanceof TypeDef);
+		assertTrue(dt instanceof Int32TDataType);
 
 		// typedef long unsigned int LUI_size_t;
 		dt = dtMgr.getDataType("/LUI_size_t");
@@ -480,6 +578,69 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		assertEquals("enum options_enum not correct", 15 >> 3 << 3,
 			((Enum) dt).getValue("SHIFTED4"));
 
+		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_char");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum _C23_enum_char size not correct", 1, dt.getLength());
+		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_short");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum _C23_enum_short size not correct", 2, dt.getLength());
+		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_int");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum _C23_enum_int size not correct", 4, dt.getLength());
+		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_long");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum _C23_enum_long size not correct", 4, dt.getLength());
+		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_longlong");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum _C23_enum_longlong size not correct", 8, dt.getLength());
+		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_DWORD");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum _C23_enum_DWORD size not correct", 4, dt.getLength());
+
+		dt = dtMgr.getDataType(new CategoryPath("/"), "packed_enum_style_1");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum packed_enum_style_1 size not correct", 1, dt.getLength());
+
+		dt = dtMgr.getDataType(new CategoryPath("/"), "packed_enum_style_2");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum packed_enum_style_2 size not correct", 1, dt.getLength());
+
+		dt = dtMgr.getDataType(new CategoryPath("/"), "packed_enum_cpp_style_1");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum packed_enum_cpp_style_1 size not correct", 1, dt.getLength());
+
+		dt = dtMgr.getDataType(new CategoryPath("/"), "packed_enum_cpp_style_2");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum packed_enum_cpp_style_2 size not correct", 1, dt.getLength());
+
+		dt = dtMgr.getDataType(new CategoryPath("/"), "packed_enum_cpp_style_gnu");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum packed_enum_cpp_style_gnu size not correct", 1, dt.getLength());
+
+		dt = dtMgr.getDataType(new CategoryPath("/"), "non_packed_enum");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum non_packed_enum size not correct", 4, dt.getLength());
+
+		dt = dtMgr.getDataType(new CategoryPath("/"), "packed_negative_enum");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum packed_negative_enum size not correct", 1, dt.getLength());
+		assertEquals("enum packed_negative_enum value not correct", -1,
+			((Enum) dt).getValue("A"));
+		assertEquals("enum packed_negative_enum value not correct", -2,
+			((Enum) dt).getValue("B"));
+		assertEquals("enum packed_negative_enum value not correct", -3,
+			((Enum) dt).getValue("C"));
+
+		dt = dtMgr.getDataType(new CategoryPath("/"), "normal_negative_enum");
+		assertTrue(dt instanceof Enum);
+		assertEquals("enum normal_negative_enum size not correct", 4, dt.getLength());
+		assertEquals("enum normal_negative_enum value not correct", -1,
+			((Enum) dt).getValue("A"));
+		assertEquals("enum normal_negative_enum value not correct", -2,
+			((Enum) dt).getValue("B"));
+		assertEquals("enum normal_negative_enum value not correct", -3,
+			((Enum) dt).getValue("C"));
+
 		dt = dtMgr.getDataType(new CategoryPath("/functions"), "__checkint");
 		assertTrue("not a function", dt instanceof FunctionDefinition);
 		str = ((FunctionDefinition) dt).getPrototypeString();
@@ -489,13 +650,13 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		assertTrue("not a function", dt instanceof FunctionDefinition);
 		str = ((FunctionDefinition) dt).getPrototypeString();
 		assertEquals("signature not correct", "int fputs(char * , void * )", str);
-		
+
 		dt = dtMgr.getDataType(new CategoryPath("/functions"), "funcParam");
 		assertTrue("not a function", dt instanceof FunctionDefinition);
 		str = ((FunctionDefinition) dt).getPrototypeString();
-		
-		
-		assertEquals("signature not correct", "void funcParam(_func_anon_ * )", replaceAnonFuncName(str));
+
+		assertEquals("signature not correct", "void funcParam(_func_anon_ * )",
+			replaceAnonFuncName(str));
 		funcDef = (FunctionDefinition) dt;
 		funcArgs = funcDef.getArguments();
 		assertTrue("ptr", funcArgs[0].getDataType() instanceof Pointer);
@@ -504,20 +665,21 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		str = ((FunctionDefinition) pointedToDT).getPrototypeString();
 		assertEquals("signature not correct", "void _func_anon_(void)", replaceAnonFuncName(str));
 
-		for (int i=1; i < 11; i++) {
-			dt = dtMgr.getDataType(new CategoryPath("/functions"), "funcParam"+i);
+		for (int i = 1; i < 11; i++) {
+			dt = dtMgr.getDataType(new CategoryPath("/functions"), "funcParam" + i);
 			assertTrue("not a function" + dt.getName(), dt instanceof FunctionDefinition);
 			str = ((FunctionDefinition) dt).getPrototypeString();
 			funcDef = (FunctionDefinition) dt;
 			funcArgs = funcDef.getArguments();
 			assertTrue("ptr", funcArgs[1].getDataType() instanceof Pointer);
 			pointedToDT = ((Pointer) funcArgs[1].getDataType()).getDataType();
-			assertTrue("ptr not to a function " + dt.getName(), pointedToDT instanceof FunctionDefinition);
+			assertTrue("ptr not to a function " + dt.getName(),
+				pointedToDT instanceof FunctionDefinition);
 			funcArgs = ((FunctionDefinition) pointedToDT).getArguments();
 			assertEquals("function args != 1 " + pointedToDT, 1, funcArgs.length);
 			assertEquals("double", funcArgs[0].getDataType().getName());
 		}
-		
+
 		dt = dtMgr.getDataType(new CategoryPath("/functions"), "funcParamNoPtr");
 		assertTrue("not a function", dt instanceof FunctionDefinition);
 		str = ((FunctionDefinition) dt).getPrototypeString();
@@ -529,7 +691,7 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		assertTrue("ptr not to a function", pointedToDT instanceof FunctionDefinition);
 		str = ((FunctionDefinition) pointedToDT).getPrototypeString();
 		assertEquals("signature not correct", "double func(double , void * )", str);
-		
+
 		dt = dtMgr.getDataType(new CategoryPath("/functions"), "funcParmWithName");
 		assertTrue("not a function", dt instanceof FunctionDefinition);
 		str = ((FunctionDefinition) dt).getPrototypeString();
@@ -538,38 +700,37 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		dt = dtMgr.getDataType(new CategoryPath("/functions"), "__mem_func");
 		assertTrue("not a function", dt instanceof FunctionDefinition);
 		str = ((FunctionDefinition) dt).getPrototypeString();
-		assertEquals("signature not correct", "void __mem_func("
-				+ "void * ,"
-				+ " char * * ,"
-				+ " int * * * ,"
-				+ " _func_anon_ * ,"
-				+ " _func_anon_1 * ,"
-				+ " _func_anon_2 * )", replaceAnonFuncName(str));
+		assertEquals(
+			"signature not correct", "void __mem_func(" + "void * ," + " char * * ," +
+				" int * * * ," + " _func_anon_ * ," + " _func_anon_1 * ," + " _func_anon_2 * )",
+			replaceAnonFuncName(str));
 		funcDef = (FunctionDefinition) dt;
 		funcArgs = funcDef.getArguments();
 		assertTrue("ptr", funcArgs[5].getDataType() instanceof Pointer);
 		pointedToDT = ((Pointer) funcArgs[5].getDataType()).getDataType();
 		assertTrue("ptr not to a function", pointedToDT instanceof FunctionDefinition);
 		str = ((FunctionDefinition) pointedToDT).getPrototypeString();
-		assertEquals("signature not correct", "void * _func_anon_(void * , size_t )", replaceAnonFuncName(str));
-		
+		assertEquals("signature not correct", "void * _func_anon_(void * , size_t )",
+			replaceAnonFuncName(str));
+
 		// ensure that temporary anonymous function definition names did not get retained
 		ArrayList<DataType> list = new ArrayList<>();
 		dtMgr.findDataTypes("_func_", list);
 		assertTrue(list.isEmpty());
 		dtMgr.findDataTypes("_func_1", list);
 		assertTrue(
-				"Expected anonymous function replaced (is blarg first function in CParserTest.h file?):" +
-					list,
-				list.isEmpty());
+			"Expected anonymous function replaced (is blarg first function in CParserTest.h file?):" +
+				list,
+			list.isEmpty());
 		dt = dtMgr.getDataType(new CategoryPath("/functions"), "blarg");
 		assertTrue("named function blarg", dt instanceof FunctionDefinition);
 		str = ((FunctionDefinition) dt).getPrototypeString();
-		assertEquals("signature not correct", "void blarg(int * , long[0][0] * )", replaceAnonFuncName(str));
+		assertEquals("signature not correct", "void blarg(int * , long[0][0] * )",
+			replaceAnonFuncName(str));
 
-	    // Structure extension
+		// Structure extension
 		dt = dtMgr.getDataType(new CategoryPath("/"), "System_System_SystemException_Fields");
-		assertTrue (dt instanceof Structure);
+		assertTrue(dt instanceof Structure);
 		sdt = (Structure) dt;
 		comp = sdt.getComponent(1);
 		assertEquals("foo", comp.getFieldName());
@@ -577,23 +738,24 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		assertEquals("bar", comp.getFieldName());
 		assertEquals("short", comp.getDataType().getName());
 		comp = sdt.getComponent(0);
-		assertTrue (comp.getDataType() instanceof Structure);
-		assertEquals ("extended parent ", "System_SystemException_Fields", comp.getDataType().getName());
+		assertTrue(comp.getDataType() instanceof Structure);
+		assertEquals("extended parent ", "System_SystemException_Fields",
+			comp.getDataType().getName());
 		sdt = (Structure) comp.getDataType();
 		comp = sdt.getComponent(0);
-		assertTrue (comp.getDataType() instanceof Structure);
-		assertEquals ("extended parent ", "System_Exception_Fields", comp.getDataType().getName());
-		
+		assertTrue(comp.getDataType() instanceof Structure);
+		assertEquals("extended parent ", "System_Exception_Fields", comp.getDataType().getName());
 
 		// Check arrays of functions in structures
 		dt = dtMgr.getDataType(new CategoryPath("/"), "SomeStruct");
-		assertTrue (dt instanceof Structure);
+		assertTrue(dt instanceof Structure);
 		sdt = (Structure) dt;
-		
+
 		int numComponents = sdt.getNumComponents();
-		assertEquals("Number of components in struct arrays of function pointer + \n" + sdt.toString(),
-				8, numComponents);
-		
+		assertEquals(
+			"Number of components in struct arrays of function pointer + \n" + sdt.toString(),
+			8, numComponents);
+
 		DataTypeComponent component = sdt.getComponent(2);
 		assertEquals("procArray1", component.getFieldName());
 		dt = component.getDataType();
@@ -602,12 +764,14 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		dt = ((Array) dt).getDataType();
 		assertTrue("ProcArray1 is not an Array of pointers", dt instanceof Pointer);
 		dt = ((Pointer) dt).getDataType();
-		assertTrue("procArray1 member is Array of function pointers", dt instanceof FunctionDefinition);
+		assertTrue("procArray1 member is Array of function pointers",
+			dt instanceof FunctionDefinition);
 		funcDef = (FunctionDefinition) dt;
 		funcArgs = funcDef.getArguments();
 		str = funcDef.getPrototypeString();
-		assertEquals("signature not correct", "char _func_anon_(int * , short * )", replaceAnonFuncName(str));
-		
+		assertEquals("signature not correct", "char _func_anon_(int * , short * )",
+			replaceAnonFuncName(str));
+
 		dt = dtMgr.getDataType(new CategoryPath("/"), "EmptyBuffer");
 		assertTrue(dt instanceof Structure);
 		sdt = (Structure) dt;
@@ -730,13 +894,13 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
 		int num = 0;
 		String replStr = str;
 		String origStr = null;
-		
+
 		while (!replStr.equals(origStr)) {
-		   origStr = replStr;
-		   replStr = replStr.replaceFirst("_func_([0-9])+", "_func_anon_" + (num == 0 ? "" : num));
-		   num++;
+			origStr = replStr;
+			replStr = replStr.replaceFirst("_func_([0-9])+", "_func_anon_" + (num == 0 ? "" : num));
+			num++;
 		}
-		
+
 		return replStr;
 	}
 }

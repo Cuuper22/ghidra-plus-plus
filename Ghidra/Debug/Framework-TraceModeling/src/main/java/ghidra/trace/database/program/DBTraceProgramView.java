@@ -56,8 +56,8 @@ import ghidra.trace.model.bookmark.TraceBookmark;
 import ghidra.trace.model.bookmark.TraceBookmarkType;
 import ghidra.trace.model.data.TraceBasedDataTypeManager;
 import ghidra.trace.model.listing.*;
+import ghidra.trace.model.memory.TraceMemoryOperations.StatePredicate;
 import ghidra.trace.model.memory.TraceMemoryRegion;
-import ghidra.trace.model.memory.TraceMemoryState;
 import ghidra.trace.model.program.TraceProgramView;
 import ghidra.trace.model.symbol.*;
 import ghidra.trace.util.TraceEvents;
@@ -1452,7 +1452,7 @@ public class DBTraceProgramView implements TraceProgramView {
 					return RangeQueryOcclusion.super.occluded(cu, range, span);
 				}
 				AddressSetView known =
-					memSpace.getAddressesWithState(span, s -> s == TraceMemoryState.KNOWN);
+					memSpace.getAddressesWithState(span, StatePredicate.IS_KNOWN);
 				if (!known.intersects(range.getMinAddress(), range.getMaxAddress())) {
 					return RangeQueryOcclusion.super.occluded(cu, range, span);
 				}
@@ -1562,5 +1562,10 @@ public class DBTraceProgramView implements TraceProgramView {
 			return null;
 		}
 		return queues;
+	}
+
+	@Override
+	public ArchiveType getArchiveType() {
+		return ArchiveType.PROGRAM;
 	}
 }

@@ -4,9 +4,9 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,7 +22,7 @@ import java.util.*;
 import db.*;
 import db.util.ErrorHandler;
 import ghidra.framework.data.OpenMode;
-import ghidra.program.database.ManagerDB;
+import ghidra.program.database.ProgramDBModule;
 import ghidra.program.database.ProgramDB;
 import ghidra.program.database.map.AddressMap;
 import ghidra.program.database.util.AddressRangeMapDB;
@@ -33,6 +33,7 @@ import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.util.RangeMapAdapter;
 import ghidra.program.util.RegisterValueStore;
 import ghidra.util.Lock;
+import ghidra.util.Lock.Closeable;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
@@ -40,7 +41,7 @@ import ghidra.util.task.TaskMonitor;
  * <code>ProgramContextDB</code> defines a processor context over an address 
  * space using database range maps for storage.
  */
-public class OldProgramContextDB implements ProgramContext, DefaultProgramContext, ManagerDB {
+public class OldProgramContextDB implements ProgramContext, DefaultProgramContext, ProgramDBModule {
 
 	private final static UndefinedValueException UNDEFINED_VALUE_EXCEPTION =
 		new UndefinedValueException();
@@ -311,12 +312,8 @@ public class OldProgramContextDB implements ProgramContext, DefaultProgramContex
 
 	@Override
 	public void invalidateCache(boolean all) throws IOException {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			valueMaps.clear();
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -326,12 +323,12 @@ public class OldProgramContextDB implements ProgramContext, DefaultProgramContex
 	}
 
 	@Override
-	public void programReady(OpenMode openMode, int currentRevision, TaskMonitor monitor)
+	public void domainObjectReady(OpenMode openMode, int currentRevision, TaskMonitor monitor)
 			throws IOException, CancelledException {
 	}
 
 	@Override
-	public void setProgram(ProgramDB program) {
+	public void setDomainObject(ProgramDB program) {
 	}
 
 	@Override
@@ -364,15 +361,11 @@ public class OldProgramContextDB implements ProgramContext, DefaultProgramContex
 	}
 
 	private AddressRangeMapDB createMap(int offset) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			AddressRangeMapDB map = new AddressRangeMapDB(dbHandle, addrMap, lock,
 				"ProgContext" + offset, errHandler, ByteField.INSTANCE, false);
 			valueMaps.put(offset, map);
 			return map;
-		}
-		finally {
-			lock.release();
 		}
 	}
 

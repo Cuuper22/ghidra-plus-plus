@@ -123,14 +123,6 @@ public class AbstractGuiTest extends AbstractGenericTest {
 		waitForSwing();
 	}
 
-	/**
-	 * @deprecated Use {@link #waitForSwing()} instead
-	 */
-	@Deprecated(forRemoval = true, since = "10.3")
-	public static void waitForPostedSwingRunnables() {
-		waitForSwing();
-	}
-
 	public static <T extends Component> T findComponent(Container parent, Class<T> desiredClass) {
 		return findComponent(parent, desiredClass, false);
 	}
@@ -582,7 +574,6 @@ public class AbstractGuiTest extends AbstractGenericTest {
 	public static void moveMouse(Component comp, int x, int y) {
 		postEvent(new MouseEvent(comp, MouseEvent.MOUSE_MOVED, System.currentTimeMillis(), 0, x, y,
 			0, false));
-
 	}
 
 	@SuppressWarnings("deprecation")
@@ -1092,28 +1083,7 @@ public class AbstractGuiTest extends AbstractGenericTest {
 	 *                running <code>doRun</code>
 	 */
 	public static void fixupGUI() throws InterruptedException, InvocationTargetException {
-		// Make the test look & feel as it would normally.
-		SwingUtilities.invokeAndWait(() -> {
-			try {
-				UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-			}
-			catch (ClassNotFoundException e1) {
-				// don't care
-			}
-			catch (InstantiationException e2) {
-				// don't care
-			}
-			catch (IllegalAccessException e3) {
-				// don't care
-			}
-			catch (UnsupportedLookAndFeelException e4) {
-				// don't care
-			}
-		});
-		// Fix up the default fonts that Java 1.5.0 changed to Courier, which looked terrible.
-		Font f = new Font("monospaced", Font.PLAIN, 12);
-		UIManager.put("PasswordField.font", f);
-		UIManager.put("TextArea.font", f);
+		// here to prevent compiler errors; should not be needed now that we have theming
 	}
 
 	/**
@@ -1138,12 +1108,19 @@ public class AbstractGuiTest extends AbstractGenericTest {
 		System.gc();
 
 		Runtime runTime = Runtime.getRuntime();
-		System.out.println("----------------------");
-		System.out.printf("Max:   %,10dK\n", runTime.maxMemory() / 1000);
-		System.out.printf("Total: %,10dK\n", runTime.totalMemory() / 1000);
-		System.out.printf("Free:  %,10dK\n", runTime.freeMemory() / 1000);
-		System.out.printf("Used:  %,10dK\n",
-			((runTime.totalMemory() - runTime.freeMemory()) / 1000));
+		long max = runTime.maxMemory() / 1000;
+		long total = runTime.totalMemory() / 1000;
+		long free = runTime.freeMemory() / 1000;
+		long used = (runTime.totalMemory() - runTime.freeMemory()) / 1000;
+
+		String msg = """
+				----------------------
+				Max:   %,10dK
+				Total: %,10dK
+				Free:  %,10dK
+				Used:  %,10dK
+				""".formatted(max, total, free, used);
+		Msg.debug(AbstractGuiTest.class, msg);
 	}
 
 //==================================================================================================
@@ -1210,7 +1187,7 @@ public class AbstractGuiTest extends AbstractGenericTest {
 		long start = System.nanoTime();
 		boolean wasEverBusy = waitForSwing(set, true);
 		long end = System.nanoTime();
-		Msg.out("\twaitForSwing() - " +
+		Msg.debug(AbstractGuiTest.class, "\twaitForSwing() - " +
 			TimeUnit.MILLISECONDS.convert(end - start, TimeUnit.NANOSECONDS));
 		*/
 

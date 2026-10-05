@@ -4,9 +4,9 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,8 +15,9 @@
  */
 package ghidra.feature.vt.api.markuptype;
 
-import java.util.ArrayList;
-import java.util.List;
+import static ghidra.feature.vt.gui.util.VTOptionDefines.*;
+
+import java.util.*;
 
 import ghidra.feature.vt.api.impl.MarkupItemImpl;
 import ghidra.feature.vt.api.main.*;
@@ -24,6 +25,7 @@ import ghidra.feature.vt.api.stringable.DataTypeStringable;
 import ghidra.feature.vt.api.util.Stringable;
 import ghidra.feature.vt.api.util.VersionTrackingApplyException;
 import ghidra.feature.vt.gui.util.VTMatchApplyChoices;
+import ghidra.feature.vt.gui.util.VTMatchApplyChoices.DataTypeConflictChoices;
 import ghidra.feature.vt.gui.util.VTMatchApplyChoices.ReplaceDataChoices;
 import ghidra.feature.vt.gui.util.VTOptionDefines;
 import ghidra.framework.options.Options;
@@ -34,7 +36,6 @@ import ghidra.program.model.listing.*;
 import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.program.util.*;
 import ghidra.util.Msg;
-import ghidra.util.SystemUtilities;
 import ghidra.util.exception.AssertException;
 
 public class DataTypeMarkupType extends VTMarkupType {
@@ -206,7 +207,8 @@ public class DataTypeMarkupType extends VTMarkupType {
 	}
 
 	private boolean setDataType(Program program, Address startAddress, DataType dataType,
-			int dataLength, VTMatchApplyChoices.ReplaceDataChoices replaceChoice)
+			int dataLength, VTMatchApplyChoices.ReplaceDataChoices replaceChoice,
+			DataTypeConflictHandler conflictHandler)
 			throws CodeUnitInsertionException, VersionTrackingApplyException {
 
 		Listing listing = program.getListing();
@@ -217,6 +219,7 @@ public class DataTypeMarkupType extends VTMarkupType {
 			throw new VersionTrackingApplyException(
 				"Data Type Markup cannot be applied since there isn't Data at the destination address!");
 		}
+
 		DataType originalDataType = originalData.getDataType();
 		int originalDataLength = originalData.getLength();
 		Address endAddress;
@@ -231,6 +234,7 @@ public class DataTypeMarkupType extends VTMarkupType {
 				"Data Type Markup cannot be applied since there isn't enough space at the " +
 					"destination address!");
 		}
+
 		AddressSet addressSet = new AddressSet(startAddress, endAddress);
 		InstructionIterator instructions = listing.getInstructions(addressSet, true);
 		boolean hasInstructions = instructions.hasNext();
@@ -242,6 +246,7 @@ public class DataTypeMarkupType extends VTMarkupType {
 					" before this Data Type Markup can be applied.";
 			throw new VersionTrackingApplyException(message);
 		}
+
 		boolean replaceUndefinedDataOnly =
 			(replaceChoice == ReplaceDataChoices.REPLACE_UNDEFINED_DATA_ONLY);
 		boolean replaceFirstOnly = (replaceChoice == ReplaceDataChoices.REPLACE_FIRST_DATA_ONLY);
@@ -251,22 +256,32 @@ public class DataTypeMarkupType extends VTMarkupType {
 		Data nextNonUndefinedDataAfter =
 			DataUtilities.getNextNonUndefinedDataAfter(program, startAddress, endAddress);
 		boolean hasOtherDefinedData = nextNonUndefinedDataAfter != null;
-
 		if (replaceUndefinedDataOnly && hasDefinedData) {
 			// Just return since we are only replacing undefined data and this has some defined data.
 			return false;
 		}
 
 		if (replaceFirstOnly && hasOtherDefinedData) {
-			// Just return since we are only replacing first data and this has some defined 
+			// Just return since we are only replacing first data and this has some defined
 			// data that would be overwritten following the first data in the destination.
 			return false;
 		}
 
-		listing.clearCodeUnits(startAddress, endAddress, false); // Clear the necessary code units.
+		/*
+		 	Note: the resolve may add a .conflict type.  That will not be removed if an exception is
+		 	thrown.  Also if an unapply is executed, .conflict types will not be removed.  For now,
+		 	we leave this up to the user to fix, should they care.  Trying to remove .conflict types
+		 	during an unapply may have unintended side-effects if the user added new uses of that 
+		 	conflict type.
+		 */
+
+		ProgramBasedDataTypeManager dtm = program.getDataTypeManager();
+		DataType resolvedDataType = dtm.resolve(dataType, conflictHandler);
+
+		listing.clearCodeUnits(startAddress, endAddress, false);
 
 		try {
-			listing.createData(startAddress, dataType, dataLength);
+			listing.createData(startAddress, resolvedDataType, dataLength);
 		}
 		catch (CodeUnitInsertionException e) {
 			tryToRestoreOriginalData(listing, startAddress, originalDataType, originalDataLength);
@@ -285,7 +300,7 @@ public class DataTypeMarkupType extends VTMarkupType {
 			// If we get an error trying to put the original back then dump a message and bail out.
 			Msg.error(this,
 				"Couldn't restore data type of " + originalDataType.getName() +
-					" after failing to set data type markup at " + address.toString() + ".\n" +
+					" after failing to set data type markup at " + address.toString() + ". " +
 					e2.getMessage());
 		}
 	}
@@ -319,27 +334,52 @@ public class DataTypeMarkupType extends VTMarkupType {
 			throw new VersionTrackingApplyException("The destination Data cannot be null!");
 		}
 
-		DataType sourceDataType = sourceData.getDataType();
-		DataType destinationDataType = destinationData.getDataType();
-		if (SystemUtilities.isEqual(sourceDataType, destinationDataType)) {
-			return false;
-		}
 		VTSession session = association.getSession();
 		Program destinationProgram = session.getDestinationProgram();
+		DataType sourceDataType = getSourceDataType(sourceData, destinationProgram, markupOptions);
+		DataType destinationDataType = destinationData.getDataType();
+		if (Objects.equals(sourceDataType, destinationDataType)) {
+			return false;
+		}
 
 		int sourceDataLength = sourceDataType.getLength();
 		if (sourceDataLength <= 0) {
 			sourceDataLength = sourceData.getLength();
 		}
 
+		DataTypeConflictChoices conflictChoice = markupOptions.getEnum(
+			VTOptionDefines.DATA_TYPE_CONFLICT_HANDLER,
+			VTOptionDefines.DEFAULT_OPTION_FOR_DATA_TYPE_CONFLICT_HANDLER);
+		DataTypeConflictHandler conflictHandler = switch (conflictChoice) {
+			case USE_EXISTING -> DataTypeConflictHandler.KEEP_HANDLER;
+			case RENAME_AND_ADD -> DataTypeConflictHandler.DEFAULT_HANDLER;
+		};
+
 		try {
 			return setDataType(destinationProgram, destinationAddress, sourceDataType,
-				sourceDataLength, replaceChoice);
+				sourceDataLength, replaceChoice, conflictHandler);
 		}
 		catch (CodeUnitInsertionException e) {
 			throw new VersionTrackingApplyException(getApplyFailedMessage(sourceAddress,
 				destinationAddress, e, sourceDataLength, destinationData.getLength()), e);
 		}
+	}
+
+	private DataType getSourceDataType(Data sourceData, Program destinationProgram,
+			ToolOptions markupOptions) {
+
+		DataType sourceDt = sourceData.getDataType();
+		if (!markupOptions.getBoolean(USE_EMPTY_COMPOSITES,
+			DEFAULT_OPTION_FOR_USE_EMPTY_STRUCTURES)) {
+			return sourceDt;
+		}
+
+		// The user would like to create empty structures when creating data types
+		ProgramBasedDataTypeManager dtm = destinationProgram.getDataTypeManager();
+		DataTypeCleaner dtCleaner = new DataTypeCleaner(dtm, false);
+		DataType cleanedDt = dtCleaner.clean(sourceDt);
+		dtCleaner.close();
+		return cleanedDt;
 	}
 
 	private String getApplyFailedMessage(Address sourceAddress, Address destinationAddress,
@@ -385,7 +425,8 @@ public class DataTypeMarkupType extends VTMarkupType {
 
 		try {
 			setDataType(destinationProgram, destinationAddress, originalDataType,
-				originalDataLength, VTMatchApplyChoices.ReplaceDataChoices.REPLACE_ALL_DATA);
+				originalDataLength, VTMatchApplyChoices.ReplaceDataChoices.REPLACE_ALL_DATA,
+				DataTypeConflictHandler.DEFAULT_HANDLER);
 		}
 		catch (CodeUnitInsertionException e) {
 			throw new VersionTrackingApplyException("Couldn't unapply data type markup @ " +

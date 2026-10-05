@@ -18,12 +18,14 @@ package ghidra.program.database;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
 
 import db.DBHandle;
 import ghidra.app.plugin.processors.generic.LanguageFixupUtil;
 import ghidra.app.plugin.processors.sleigh.SleighLanguage;
+import ghidra.app.util.sourcelanguage.SourceLanguageID;
 import ghidra.framework.Application;
 import ghidra.framework.data.DomainObjectAdapterDB;
 import ghidra.framework.data.OpenMode;
@@ -49,6 +51,7 @@ import ghidra.program.database.sourcemap.SourceFileManagerDB;
 import ghidra.program.database.symbol.*;
 import ghidra.program.database.util.AddressSetPropertyMapDB;
 import ghidra.program.model.address.*;
+import ghidra.program.model.data.ArchiveType;
 import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.lang.*;
 import ghidra.program.model.listing.*;
@@ -59,6 +62,7 @@ import ghidra.program.model.util.AddressSetPropertyMap;
 import ghidra.program.model.util.PropertyMapManager;
 import ghidra.program.util.*;
 import ghidra.util.*;
+import ghidra.util.Lock.Closeable;
 import ghidra.util.exception.*;
 import ghidra.util.task.TaskMonitor;
 
@@ -119,8 +123,9 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	 * 15-Sep-2025 - version 31   Code Mananger dropped Composites property map use
 	 * 19-Sep-2025 - version 32   Expanded number of SourceType values and record storage affecting
 	 *                            SymbolDB, FunctionDB and RefListFlagsV0
+	 * 14-Apr-2026 - version 33   Introduced Library symbol ordinal assignment.
 	 */
-	static final int DB_VERSION = 32;
+	static final int DB_VERSION = 33;
 
 	/**
 	 * UPGRADE_REQUIRED_BFORE_VERSION should be changed to DB_VERSION anytime the
@@ -141,6 +146,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	public static final int COMPOUND_VARIABLE_STORAGE_ADDED_VERSION = 18;
 	public static final int AUTO_PARAMETERS_ADDED_VERSION = 19;
 	public static final int RELOCATION_STATUS_ADDED_VERSION = 26;
+	public static final int LIBRARY_ORDINAL_ASSIGNMENT_ADDED_VERSION = 33;
 
 	private static final String DATA_MAP_TABLE_NAME = "Program";
 
@@ -159,6 +165,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	private static final String EXECUTE_PATH = "Execute Path";
 	private static final String EXECUTE_FORMAT = "Execute Format";
 	private static final String IMAGE_OFFSET = "Image Offset";
+	private static final String SOURCE_LANGUAGES = "Source Languages";
 
 	//
 	// The numbering of managers controls the order in which they are notified.
@@ -195,7 +202,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 	private static final int NUM_MANAGERS = 15;
 
-	private ManagerDB[] managers = new ManagerDB[NUM_MANAGERS];
+	private ProgramDBModule[] managers = new ProgramDBModule[NUM_MANAGERS];
 	private OldFunctionManager oldFunctionMgr;
 	private MemoryMapDB memoryManager;
 	private GlobalNamespace globalNamespace;
@@ -638,6 +645,28 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	public void setCompiler(String compiler) {
 		Options pl = getOptions(PROGRAM_INFO);
 		pl.setString(COMPILER, compiler);
+	}
+
+	@Override
+	public Set<SourceLanguageID> getSourceLanguageIDs() {
+		Set<SourceLanguageID> ret = new HashSet<>();
+		String value = getOptions(PROGRAM_INFO).getString(SOURCE_LANGUAGES, "");
+		for (String entry : value.split(",")) {
+			entry = entry.trim();
+			if (!entry.isEmpty()) {
+				ret.add(new SourceLanguageID(entry));
+			}
+		}
+		return ret;
+	}
+
+	@Override
+	public void setSourceLanguageIDs(Set<SourceLanguageID> sourceLanguageIDs) {
+		String combined = sourceLanguageIDs.stream()
+				.map(SourceLanguageID::getIdAsString)
+				.sorted()
+				.collect(Collectors.joining(", "));
+		getOptions(PROGRAM_INFO).setString(SOURCE_LANGUAGES, combined);
 	}
 
 	@Override
@@ -1160,8 +1189,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 	@Override
 	public void setName(String newName) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			if (name.equals(newName)) {
 				return;
 			}
@@ -1171,9 +1199,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		}
 		catch (IOException e) {
 			dbError(e);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -1206,8 +1231,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		}
 
 		ProgramOverlayAddressSpace ovSpace = null;
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			if (imageBaseOverride) {
 				throw new IllegalStateException(
 					"Overlay spaces may not be created while an image-base override is active");
@@ -1220,9 +1244,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		catch (IOException e) {
 			dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return ovSpace;
 	}
 
@@ -1230,8 +1251,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	public void renameOverlaySpace(String overlaySpaceName, String newName)
 			throws NotFoundException, InvalidNameException, DuplicateNameException, LockException {
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			checkExclusiveAccess();
 
 			AddressSpace space = addressFactory.getAddressSpace(overlaySpaceName);
@@ -1253,16 +1273,12 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		catch (IOException e) {
 			dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
 	public boolean removeOverlaySpace(String overlaySpaceName)
 			throws LockException, NotFoundException {
 
-		lock.acquire();
 		try {
 			checkExclusiveAccess();
 
@@ -1286,9 +1302,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		catch (IOException e) {
 			dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return false;
 	}
 
@@ -1309,7 +1322,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	}
 
 	// TODO: We need a more global solution for this.
-	@Deprecated
+	@Deprecated(since = "10.2")
 	public void setEffectiveImageBase(Address imageBase) {
 		effectiveImageBase = imageBase;
 	}
@@ -1321,8 +1334,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		if (commit) {
 			checkExclusiveAccess();
 		}
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			Address currentImageBase = getImageBase();
 			if (!(commit && imageBaseOverride) && base.equals(currentImageBase)) {
 				return;
@@ -1382,9 +1394,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			}
 			invalidate();
 		}
-		finally {
-			lock.release();
-		}
 		//NOTE:
 		//this needs to be outside the lock...
 		((TreeManager) managers[TREE_MGR]).imageBaseChanged(commit);
@@ -1396,13 +1405,9 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		if (!imageBaseOverride) {
 			return;
 		}
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			imageBaseOverride = false;
 			invalidate();
-		}
-		finally {
-			lock.release();
 		}
 		//NOTE:
 		//this needs to be outside the lock...
@@ -1830,7 +1835,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		globalNamespace = new GlobalNamespace(getMemory());
 		for (int i = 0; i < NUM_MANAGERS; i++) {
 			monitor.checkCancelled();
-			managers[i].setProgram(this);
+			managers[i].setDomainObject(this);
 		}
 		listing.setProgram(this);
 
@@ -1849,15 +1854,14 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 		for (int i = 0; i < NUM_MANAGERS; i++) {
 			monitor.checkCancelled();
-			managers[i].programReady(openMode, getStoredVersion(), monitor);
+			managers[i].domainObjectReady(openMode, getStoredVersion(), monitor);
 		}
 
 	}
 
 	@Override
 	protected void clearCache(boolean all) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			super.clearCache(all);
 			refreshName();
 			overlaySpaceAdapter.updateOverlaySpaces(addressFactory);
@@ -1871,9 +1875,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		}
 		catch (IOException e) {
 			dbError(e);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -1944,8 +1945,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			throws RollbackException {
 
 // TODO: ensure that managers are notified with address ranges which correspond to a sequential set of address keys
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			for (int i = NUM_MANAGERS - 1; i >= 0; i--) {
 				managers[i].deleteAddressRange(startAddr, endAddr, monitor);
 			}
@@ -1967,9 +1967,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		catch (CancelledException e) {
 			throw new RollbackException("Operation cancelled");
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	/**
@@ -1989,8 +1986,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 // TODO: WARNING! fromAddr range may no longer exist in memory map which could affect certain database iterators
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			for (int i = NUM_MANAGERS - 1; i >= 0; i--) {
 				managers[i].moveAddressRange(fromAddr, toAddr, length, monitor);
 			}
@@ -2009,9 +2005,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		}
 		catch (CancelledException e) {
 			throw new RollbackException("Operation cancelled");
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -2057,8 +2050,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 		checkExclusiveAccess();
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			setEventsEnabled(false);
 			try {
 				boolean redisassemblyRequired = true;
@@ -2139,8 +2131,8 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 				getDataTypeManager().languageChanged(monitor);
 
 				// Force function manager to reconcile calling conventions
-				managers[FUNCTION_MGR].setProgram(this);
-				managers[FUNCTION_MGR].programReady(OpenMode.UPDATE, getStoredVersion(), monitor);
+				managers[FUNCTION_MGR].setDomainObject(this);
+				managers[FUNCTION_MGR].domainObjectReady(OpenMode.UPDATE, getStoredVersion(), monitor);
 
 				if (translator != null) {
 					// allow complex language upgrades to transform instructions/context
@@ -2167,9 +2159,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			}
 			fireEvent(new DomainObjectChangeRecord(ProgramEvent.LANGUAGE_CHANGED));
 		}
-		finally {
-			lock.release();
-		}
+
 	}
 
 	/*
@@ -2281,23 +2271,18 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	@Override
 	public AddressSetPropertyMap createAddressSetPropertyMap(String mapName)
 			throws DuplicateNameException {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			AddressSetPropertyMapDB map =
 				AddressSetPropertyMapDB.createPropertyMap(this, mapName, this, addrMap, lock);
 			addrSetPropertyMap.put(mapName, map);
 			setChanged(ProgramEvent.ADDRESS_PROPERTY_MAP_ADDED, null, mapName);
 			return map;
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
 	public AddressSetPropertyMap getAddressSetPropertyMap(String mapName) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			AddressSetPropertyMapDB map = addrSetPropertyMap.get(mapName);
 			if (map != null) {
 				return map;
@@ -2309,15 +2294,11 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			}
 			return map;
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
 	public void deleteAddressSetPropertyMap(String mapName) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			AddressSetPropertyMapDB pm = addrSetPropertyMap.remove(mapName);
 			if (pm == null) {
 				pm = AddressSetPropertyMapDB.getPropertyMap(this, mapName, this, addrMap, lock);
@@ -2327,29 +2308,21 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 				setChanged(ProgramEvent.ADDRESS_PROPERTY_MAP_REMOVED, null, mapName);
 			}
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
 	public IntRangeMapDB createIntRangeMap(String mapName) throws DuplicateNameException {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			IntRangeMapDB map = IntRangeMapDB.createPropertyMap(this, mapName, this, addrMap, lock);
 			intRangePropertyMap.put(mapName, map);
 			setChanged(ProgramEvent.INT_PROPERTY_MAP_ADDED, null, mapName);
 			return map;
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
 	public IntRangeMap getIntRangeMap(String mapName) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			IntRangeMapDB rangeMap = intRangePropertyMap.get(mapName);
 			if (rangeMap != null) {
 				return rangeMap;
@@ -2361,15 +2334,11 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			}
 			return rangeMap;
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
 	public void deleteIntRangeMap(String mapName) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			IntRangeMapDB rangeMap = intRangePropertyMap.remove(mapName);
 			if (rangeMap == null) {
 				rangeMap = IntRangeMapDB.getPropertyMap(this, mapName, this, addrMap, lock);
@@ -2380,10 +2349,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 				setChanged(ProgramEvent.INT_PROPERTY_MAP_REMOVED, null, mapName);
 			}
 		}
-		finally {
-			lock.release();
-		}
-
 	}
 
 	@Override
@@ -2397,7 +2362,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		super.close();
 		intRangePropertyMap.clear();
 		addrSetPropertyMap.clear();
-		for (ManagerDB manager : managers) {
+		for (ProgramDBModule manager : managers) {
 			// have to check for null in case we are closing after a failed open. This happens during
 			// testing where we first try to open a program and if it fails, we upgrade and re-open.
 			if (manager != null) {
@@ -2518,14 +2483,10 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		if (!(compilerSpec instanceof ProgramCompilerSpec)) {
 			return;
 		}
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			((ProgramCompilerSpec) compilerSpec).installExtensions();
 			getFunctionManager().invalidateCache(true);
 			getDataTypeManager().invalidateCache();
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -2541,5 +2502,10 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	protected void domainObjectRestored() {
 		super.domainObjectRestored();
 		getDataTypeManager().notifyRestored();
+	}
+
+	@Override
+	public ArchiveType getArchiveType() {
+		return ArchiveType.PROGRAM;
 	}
 }

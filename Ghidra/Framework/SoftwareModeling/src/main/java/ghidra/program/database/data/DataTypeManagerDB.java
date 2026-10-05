@@ -15,7 +15,6 @@
  */
 package ghidra.program.database.data;
 
-import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,15 +28,12 @@ import org.apache.commons.lang3.StringUtils;
 
 import db.*;
 import db.util.ErrorHandler;
-import generic.jar.ResourceFile;
 import generic.stl.Pair;
 import ghidra.app.plugin.core.datamgr.archive.BuiltInSourceArchive;
 import ghidra.docking.settings.*;
 import ghidra.framework.Application;
 import ghidra.framework.data.OpenMode;
 import ghidra.framework.model.RuntimeIOException;
-import ghidra.framework.store.db.PackedDBHandle;
-import ghidra.framework.store.db.PackedDatabase;
 import ghidra.graph.*;
 import ghidra.graph.algo.GraphNavigator;
 import ghidra.program.database.*;
@@ -50,9 +46,9 @@ import ghidra.program.model.data.Enum;
 import ghidra.program.model.lang.*;
 import ghidra.program.model.listing.Function;
 import ghidra.util.*;
+import ghidra.util.Lock.Closeable;
 import ghidra.util.classfinder.ClassSearcher;
 import ghidra.util.classfinder.ClassTranslator;
-import ghidra.util.datastruct.FixedSizeHashMap;
 import ghidra.util.exception.*;
 import ghidra.util.task.TaskMonitor;
 
@@ -79,9 +75,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * mode must always be allowed when opening older versions.
 	 *             - version  1 - Legacy prior to overall DTM versioning (not stored)
 	 * 12-Jan-2022 - version  2 - Introduced DataTypeManager data map table and overall DTM version.
-	 *                            Also added typedef flags and auto-naming support.
+	 *                            Also added typedef flags and auto-naming support
+	 * 22-Jun-2026 - version  3 - standardized on use of DtArchiveDB Domain Object for all archives.
 	 */
-	static final int DB_VERSION = 2;
+	static final int DB_VERSION = 3;
 
 	static long ROOT_CATEGORY_ID = 0;
 
@@ -133,18 +130,20 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	protected final boolean readOnlyMode;
 	protected final DBHandle dbHandle;
 	protected final String tablePrefix;
-	protected final ErrorHandler errHandler;
+
+	protected ErrorHandler errHandler;
+	protected Lock lock;
 
 	private DataTypeConflictHandler currentHandler;
 
 	private CategoryDB root;
-	private DBObjectCache<DataTypeDB> dtCache;
-	private DBObjectCache<SourceArchiveDB> sourceArchiveDBCache;
-	private HashMap<Long, DataType> builtInMap = new HashMap<>();
-	private HashMap<DataType, Long> builtIn2IdMap = new HashMap<>();
-	private DBObjectCache<CategoryDB> catCache = new DBObjectCache<>(50);
+	private DbCache<DataTypeDB> dtCache;
+	private DbCache<SourceArchiveDB> sourceArchiveDBCache;
+	private DbCache<CategoryDB> catCache;
+	private Map<Long, DataType> builtInMap;
+	private Map<DataType, Long> builtIn2IdMap;
 	private SettingsCache<Long> settingsCache = new SettingsCache<>(200);
-	private List<DataType> sortedDataTypes;
+	private List<DataType> lazySortedDataTypes;
 	private Map<Long, Set<String>> enumValueMap;
 	private Map<String, Set<String>> previouslyUsedSettingsValuesMap = new HashMap<>();
 
@@ -155,7 +154,9 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	private int creatingDataType = 0;
 	protected UniversalID universalID;
 
-	private Map<UniversalID, SourceArchive> sourceArchiveMap;
+	// this map is lazy loaded and  set to null when invalidated. Made volatile since checking
+	// the existence of this variable is not synchronized.
+	private volatile Map<UniversalID, SourceArchive> cachedSourceArchiveMap;
 	private LinkedList<Long> idsToDelete = new LinkedList<>();
 	private LinkedList<Pair<DataType, DataType>> typesToReplace = new LinkedList<>();
 	private List<DataType> favoritesList = new ArrayList<>();
@@ -175,195 +176,16 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	private ThreadLocal<EquivalenceCache> equivalenceCache = new ThreadLocal<>();
 
 	private IdentityHashMap<DataType, DataType> resolveCache;
-	private TreeSet<ResolvePair> resolveQueue; // Note: is TreeSet really needed?
+	private TreeSet<ResolvedDt> resolveQueue; // Note: is TreeSet really needed?
 	private LinkedList<DataType> conflictQueue = new LinkedList<>();
 
 	private boolean isBulkRemoving;
-
-	protected AddressMap addrMap;
 
 	private DataOrganization dataOrganization;
 	private ProgramArchitecture programArchitecture;
 	private VariableStorageManager variableStorageMgr;
 
-	protected final Lock lock;
-
-	private static class ResolvePair implements Comparable<ResolvePair> {
-
-		private final DataTypeDB resolvedDt;
-		private final DataType definitionDt;
-
-		ResolvePair(DataTypeDB resolvedDt, DataType definitionDt) {
-			this.resolvedDt = resolvedDt;
-			this.definitionDt = definitionDt;
-		}
-
-		@Override
-		public boolean equals(Object obj) {
-			if (!(obj instanceof ResolvePair)) {
-				return false;
-			}
-			return resolvedDt.getKey() == ((ResolvePair) obj).resolvedDt.getKey();
-		}
-
-		@Override
-		public int hashCode() {
-			long value = resolvedDt.getKey();
-			return (int) (value ^ (value >>> 32));
-		}
-
-		@Override
-		public int compareTo(ResolvePair o) {
-			long r = resolvedDt.getKey() - o.resolvedDt.getKey();
-			if (r == 0) {
-				return 0;
-			}
-			if (r < 0) {
-				return -1;
-			}
-			return 1;
-		}
-	}
-
-	/**
-	 * Construct a new temporary data-type manager. Note that this manager does not
-	 * support the save or saveAs operation.  No Language is associated with instance.
-	 * 
-	 * @param dataOrganization applicable data organization
-	 * @throws RuntimeIOException if database error occurs during creation
-	 */
-	protected DataTypeManagerDB(DataOrganization dataOrganization) throws RuntimeIOException {
-		this.lock = new Lock("DataTypeManagerDB");
-		this.errHandler = new DbErrorHandler();
-		this.dataOrganization = dataOrganization;
-		this.tablePrefix = "";
-
-		try {
-			dbHandle = new DBHandle();
-			readOnlyMode = false;
-			long txId = dbHandle.startTransaction();
-			try {
-				init(OpenMode.CREATE, TaskMonitor.DUMMY);
-			}
-			catch (VersionException | CancelledException e) {
-				throw new AssertException(e); // unexpected
-			}
-			finally {
-				dbHandle.endTransaction(txId, true);
-			}
-		}
-		catch (IOException e) {
-			throw new RuntimeIOException(e);
-		}
-	}
-
-	/**
-	 * Constructor for a data-type manager backed by a packed database file. When
-	 * opening for UPDATE an automatic upgrade will be performed if required.
-	 * NOTE: Default DataOrganization will be used for new archive.
-	 * 
-	 * @param packedDBfile packed datatype archive file (i.e., *.gdt resource).
-	 * @param openMode     open mode CREATE, READ_ONLY or UPDATE 
-	 * @param monitor task monitor
-	 * @throws IOException a low-level IO error. This exception may also be thrown
-	 *                     when a version error occurs (cause is VersionException).
-	 * @throws CancelledException if task cancelled
-	 */
-	protected DataTypeManagerDB(ResourceFile packedDBfile, OpenMode openMode, TaskMonitor monitor)
-			throws IOException, CancelledException {
-
-		this.errHandler = new DbErrorHandler();
-		this.lock = new Lock("DataTypeManagerDB");
-		this.tablePrefix = "";
-		this.readOnlyMode = (openMode == OpenMode.IMMUTABLE);
-
-		File file = packedDBfile.getFile(false);
-		if (file == null && openMode != OpenMode.IMMUTABLE) {
-			throw new IOException("Unsupported mode (" + openMode +
-				") for read-only Datatype Archive: " + packedDBfile.getAbsolutePath());
-		}
-
-		// Open packed database archive
-		boolean openSuccess = false;
-		PackedDatabase pdb = null;
-		try {
-			if (openMode == OpenMode.CREATE) {
-				dbHandle = new PackedDBHandle(
-					DataTypeArchiveContentHandler.DATA_TYPE_ARCHIVE_CONTENT_TYPE);
-			}
-			else {
-				pdb = PackedDatabase.getPackedDatabase(packedDBfile, false, monitor);
-
-				if (openMode == OpenMode.IMMUTABLE) {
-					dbHandle = pdb.open(monitor);
-				}
-				else { // UPDATE mode (allows upgrade use)
-					dbHandle = pdb.openForUpdate(monitor);
-				}
-			}
-			openSuccess = true;
-		}
-		finally {
-			if (!openSuccess && pdb != null) {
-				pdb.dispose(); // dispose on error
-			}
-		}
-
-		// Initialize datatype manager and save new archive on CREATE
-		boolean initSuccess = false;
-		try {
-			initPackedDatabase(packedDBfile, openMode, monitor); // performs upgrade if needed
-			if (openMode == OpenMode.CREATE) {
-				// preserve UniversalID if it has been established
-				Long uid = universalID != null ? universalID.getValue() : null;
-				((PackedDBHandle) dbHandle).saveAs("Archive", file.getParentFile(),
-					packedDBfile.getName(), uid, monitor);
-			}
-			initSuccess = true;
-		}
-		finally {
-			if (!initSuccess) {
-				dbHandle.close(); // close on error (packed database will also be disposed)
-			}
-		}
-	}
-
-	private void initPackedDatabase(ResourceFile packedDBfile, OpenMode openMode,
-			TaskMonitor monitor) throws CancelledException, IOException {
-		Long txId = dbHandle.startTransaction();
-		try {
-			init(openMode, monitor);
-
-			if (openMode != OpenMode.CREATE && hasDataOrganizationChange(true)) {
-				// check for data organization change with possible upgrade
-				handleDataOrganizationChange(openMode, monitor);
-			}
-
-			if (openMode == OpenMode.UPGRADE) {
-				migrateOldFlexArrayComponentsIfRequired(monitor);
-
-				Msg.showInfo(this, null, "Archive Upgraded",
-					"Data type archive has been upgraded: " + packedDBfile.getName());
-			}
-		}
-		catch (VersionException e) {
-			if (openMode == OpenMode.UPDATE && e.isUpgradable()) {
-				// Try again with UPGRADE mode
-				dbHandle.endTransaction(txId, true);
-				txId = null;
-				initPackedDatabase(packedDBfile, OpenMode.UPGRADE, monitor);
-			}
-			else {
-				// Unable to handle required upgrade
-				throw new IOException(e);
-			}
-		}
-		finally {
-			if (txId != null) {
-				dbHandle.endTransaction(txId, true);
-			}
-		}
-	}
+	protected AddressMap addrMap;
 
 	/**
 	 * Constructor for a database-backed <code>DataTypeManagerDB</code> extension.
@@ -385,16 +207,54 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * @throws VersionException if any database handle's version doesn't match the expected version.
 	 *                   This exception will never be thrown in READ_ONLY mode.
 	 */
-	protected DataTypeManagerDB(DBHandle handle, AddressMap addrMap, OpenMode openMode,
+	protected DataTypeManagerDB(DBHandle handle, OpenMode openMode, AddressMap addrMap,
 			String tablePrefix, ErrorHandler errHandler, Lock lock, TaskMonitor monitor)
 			throws CancelledException, IOException, VersionException {
+		this.addrMap = addrMap;
 		this.tablePrefix = tablePrefix != null ? tablePrefix : "";
 		this.dbHandle = handle;
 		this.readOnlyMode = (openMode == OpenMode.IMMUTABLE);
-		this.addrMap = addrMap;
 		this.errHandler = errHandler;
 		this.lock = lock;
 		init(openMode, monitor);
+	}
+
+	/**
+	 * Constructor for a transient database-backed <code>DataTypeManagerDB</code> instance using
+	 * a new {@link DBHandle}.
+	 * 
+	 * @throws RuntimeIOException if there is a problem creating the database
+	 */
+	protected DataTypeManagerDB()
+			throws RuntimeIOException {
+		try {
+			this.tablePrefix = "";
+			this.dbHandle = new DBHandle();
+			this.readOnlyMode = false;
+			this.errHandler = new DbErrorHandler();
+			this.lock = new Lock("DTMLock");
+			long txId = dbHandle.startTransaction();
+			try {
+				init(OpenMode.CREATE, TaskMonitor.DUMMY);
+			}
+			finally {
+				dbHandle.endTransaction(txId, true);
+			}
+		}
+		catch (CancelledException | VersionException e) {
+			throw new AssertException(e);
+		}
+		catch (IOException e) {
+			throw new RuntimeIOException(e);
+		}
+	}
+
+	private static class DbErrorHandler implements ErrorHandler {
+
+		@Override
+		public void dbError(IOException e) throws RuntimeIOException {
+			throw new RuntimeIOException(e);
+		}
 	}
 
 	private void init(OpenMode openMode, TaskMonitor monitor)
@@ -404,11 +264,13 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		if (checkForSourceArchiveUpdatesNeeded(openMode, monitor)) {
 			doSourceArchiveUpdates(monitor);
 		}
-		dtCache = new DBObjectCache<>(10);
-		sourceArchiveDBCache = new DBObjectCache<>(10);
-		builtInMap = new HashMap<>();
-		builtIn2IdMap = new HashMap<>();
-		root = new CategoryDB(this, catCache);
+		dtCache = new DbCache<>(new DtFactory(), lock, 10);
+		sourceArchiveDBCache = new DbCache<>(new ArchiveFactory(), lock, 10);
+		catCache = new DbCache<>(new CategoryFactory(), lock, 10);
+		builtInMap = Collections.synchronizedMap(new HashMap<>());
+		builtIn2IdMap = Collections.synchronizedMap(new HashMap<>());
+		root = new CategoryDB(this, ROOT_CATEGORY_ID, null, "/");
+		catCache.add(root);
 		if (parentChildAdapter.needsInitializing()) {
 			initializedParentChildTable();
 		}
@@ -572,7 +434,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * able to instantiate all dataTypes to accomplish this.
 	 */
 	private void initializedParentChildTable() {
-		buildSortedDataTypeList();
+		List<DataType> sortedDataTypes = getSortedDataTypes();
 		for (DataType dt : sortedDataTypes) {
 			if (dt instanceof Array) {
 				((Array) dt).getDataType().addParent(dt);
@@ -663,23 +525,18 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	}
 
 	boolean clearSetting(long dataTypeId, String name) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			settingsCache.remove(dataTypeId, name);
 			return settingsAdapter.removeSettingsRecord(dataTypeId, name);
 		}
 		catch (IOException e) {
 			errHandler.dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return false;
 	}
 
 	boolean clearAllSettings(long dataTypeId) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			boolean changed = false;
 			Field[] keys = settingsAdapter.getSettingsKeys(dataTypeId);
 			for (Field key : keys) {
@@ -695,29 +552,21 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		catch (IOException e) {
 			errHandler.dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return false;
 	}
 
 	String[] getSettingsNames(long dataTypeId) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			return settingsAdapter.getSettingsNames(dataTypeId);
 		}
 		catch (IOException e) {
 			errHandler.dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return new String[0];
 	}
 
 	SettingDB getSetting(long dataTypeId, String name) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			SettingDB setting = settingsCache.get(dataTypeId, name);
 			if (setting != null) {
 				return setting;
@@ -732,15 +581,11 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		catch (IOException e) {
 			errHandler.dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return null;
 	}
 
 	boolean updateSettingsRecord(long dataTypeId, String name, String strValue, long longValue) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			DBRecord rec =
 				settingsAdapter.updateSettingsRecord(dataTypeId, name, strValue, longValue);
 			if (rec != null) {
@@ -759,9 +604,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 		catch (IOException e) {
 			errHandler.dbError(e);
-		}
-		finally {
-			lock.release();
 		}
 		return false;
 	}
@@ -786,8 +628,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		if (!settingsDefinition.supportsSuggestedValues()) {
 			return Settings.EMPTY_STRING_ARRAY;
 		}
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			Set<String> previouslyUsedSet = previouslyUsedSettingsValuesMap.computeIfAbsent(
 				settingsDefinition.getStorageKey(), n -> generateSuggestions(settingsDefinition));
 			// Last-minute additions are not cached since suggested values may change
@@ -797,9 +638,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				return Settings.EMPTY_STRING_ARRAY;
 			}
 			return set.toArray(new String[set.size()]);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -849,6 +687,11 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				invalidateCache();
 			}
 		}
+	}
+
+	protected void setDataOrganization(DataOrganization dataOrganization) {
+		this.dataOrganization = dataOrganization != null ? dataOrganization
+				: DataOrganizationImpl.getDefaultOrganization();
 	}
 
 	/**
@@ -934,21 +777,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		return programArchitecture;
 	}
 
-	protected static String getProgramArchitectureSummary(LanguageID languageId,
-			int languageVersion, CompilerSpecID compilerSpecId) {
-		StringBuilder buf = new StringBuilder();
-		buf.append(languageId.getIdAsString());
-		buf.append(" / ");
-		buf.append(compilerSpecId.getIdAsString());
-		return buf.toString();
-	}
-
 	@Override
 	public String getProgramArchitectureSummary() {
 		if (programArchitecture != null) {
-			return getProgramArchitectureSummary(programArchitecture.getLanguage().getLanguageID(),
-				programArchitecture.getLanguage().getVersion(),
-				programArchitecture.getCompilerSpec().getCompilerSpecID());
+			return programArchitecture.getSummary();
 		}
 		return null;
 	}
@@ -980,18 +812,26 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		defaultListener.restored(this);
 	}
 
+	/**
+	 * {@return the ID associated this datatype manager's associated domain file storage if 
+	 * applicable, or null}
+	 */
 	abstract protected String getDomainFileID();
 
-	abstract protected String getPath();
-
-	private void buildSortedDataTypeList() {
-		if (sortedDataTypes != null) {
-			return;
+	private List<DataType> getSortedDataTypes() {
+		List<DataType> local = lazySortedDataTypes;
+		if (local == null) {
+			local = doBuildSortedDataTypesList();
 		}
+		return local;
+	}
+
+	private synchronized List<DataType> doBuildSortedDataTypesList() {
 		List<DataType> list = new ArrayList<>();
 		popuplateDataTypeList(list, root);
 		Collections.sort(list, nameComparator);
-		sortedDataTypes = list;
+		lazySortedDataTypes = list;
+		return list;
 	}
 
 	private void buildEnumValueMap() {
@@ -1004,31 +844,40 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	}
 
 	private void removeDataTypeFromSortedList(DataTypePath dataTypePath) {
-		if (sortedDataTypes == null) {
+		// we assume we have the write lock here
+		if (!lock.isWriteLockedByCurrentThread()) {
+			throw new AssertException("Attempted to modify sorted datatypes without write lock");
+		}
+		if (lazySortedDataTypes == null) {
 			return;
 		}
 		// find and remove exact match from sortedDataTypes list
 		String name = dataTypePath.getDataTypeName();
 		DataType compareDataType =
 			new TypedefDataType(dataTypePath.getCategoryPath(), name, DataType.DEFAULT, this);
-		int index = Collections.binarySearch(sortedDataTypes, compareDataType, nameComparator);
+		int index = Collections.binarySearch(lazySortedDataTypes, compareDataType, nameComparator);
 		if (index >= 0) {
-			sortedDataTypes.remove(index);
+			lazySortedDataTypes.remove(index);
 		}
 	}
 
 	private void insertDataTypeIntoSortedList(DataType dataType) {
-		if (sortedDataTypes == null) {
+		// we assume there is a write lock at this point
+		// we assume we have the write lock here
+		if (!lock.isWriteLockedByCurrentThread()) {
+			throw new AssertException("Attempted to modify sorted datatypes without write lock");
+		}
+		if (lazySortedDataTypes == null) {
 			return;
 		}
-		int index = Collections.binarySearch(sortedDataTypes, dataType, nameComparator);
+		int index = Collections.binarySearch(lazySortedDataTypes, dataType, nameComparator);
 		if (index < 0) {
 			index = -index - 1;
-			sortedDataTypes.add(index, dataType);
+			lazySortedDataTypes.add(index, dataType);
 		}
 		else {
 			// NOTE: ideally, this should never happen and may indicate presence of duplicate
-			sortedDataTypes.set(index, dataType);
+			lazySortedDataTypes.set(index, dataType);
 		}
 	}
 
@@ -1075,23 +924,13 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 
 	@Override
 	public List<DataType> getFavorites() {
-		lock.acquire();
-		try {
-			return new ArrayList<>(favoritesList);
-		}
-		finally {
-			lock.release();
-		}
+		return lock.withRead(() -> new ArrayList<>(favoritesList));
 	}
 
 	@Override
 	public boolean isFavorite(DataType dataType) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			return favoritesList.contains(dataType);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -1101,8 +940,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			throw new IllegalArgumentException(
 				"Datatype does not belong to this datatype manager.");
 		}
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			boolean isInFavorites = favoritesList.contains(dataType);
 			if (isInFavorites == isFavorite) {
 				return; // no change
@@ -1114,9 +952,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				favoritesList.remove(dataType);
 			}
 			favoritesChanged(dataType, isFavorite);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -1182,31 +1017,14 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		return parent.getCategory(path.getName());
 	}
 
-	CategoryDB getCategoryDB(long id) throws IOException {
-		if (id == DataTypeManagerDB.ROOT_CATEGORY_ID) {
-			return root;
-		}
-		CategoryDB cat = catCache.get(id);
-		if (cat == null) {
-			DBRecord rec = categoryAdapter.getRecord(id);
-			if (rec != null) {
-				long parentID = rec.getLongValue(CategoryDBAdapter.CATEGORY_PARENT_COL);
-				CategoryDB parent = getCategoryDB(parentID);
-				String name = rec.getString(CategoryDBAdapter.CATEGORY_NAME_COL);
-				cat = new CategoryDB(this, catCache, id, parent, name);
-			}
-		}
-		return cat;
-	}
-
 	CategoryDB createCategoryDB(CategoryDB parent, String categoryName) throws IOException {
 		CategoryDB c = parent.getCategory(categoryName);
 		if (c != null) {
 			return c;
 		}
 		DBRecord rec = categoryAdapter.createCategory(categoryName, parent.getKey());
-		String name = rec.getString(CategoryDBAdapter.CATEGORY_NAME_COL);
-		CategoryDB cat = new CategoryDB(this, catCache, rec.getKey(), parent, name);
+		CategoryDB cat = new CategoryDB(this, rec.getKey(), parent, categoryName);
+		catCache.add(cat);
 		parent.categoryAdded(cat);// must be before the event notification below
 		categoryCreated(cat);
 		return cat;
@@ -1219,17 +1037,11 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 */
 	@Override
 	public Category getCategory(long id) {
-		lock.acquire();
-		try {
-			return getCategoryDB(id);
+		if (id == DataTypeManagerDB.ROOT_CATEGORY_ID) {
+			return root;
 		}
-		catch (IOException e) {
-			dbError(e);
-			return null;
-		}
-		finally {
-			lock.release();
-		}
+
+		return catCache.getCachedInstance(id);
 	}
 
 	@Override
@@ -1249,12 +1061,17 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			return resolveBitFieldDataType((BitFieldDataType) dataType, handler);
 		}
 
-		lock.acquire();
 		DataTypeConflictHandler originalHandler = null;
-		boolean isEquivalenceCacheOwner = activateEquivalenceCache();
-		boolean isResolveCacheOwner = activateResolveCache();
+		boolean isResolveCacheOwner = false;
+		boolean isEquivalenceCacheOwner = false;
 		DataType resolvedDataType = null;
+
+		// can't use the auto-closable here because most of the finally block need to happen
+		// with the lock still in place. Auto-closables happen before the finally block in java
+		lock.writeLock().lock();
 		try {
+			isEquivalenceCacheOwner = activateEquivalenceCache();
+			isResolveCacheOwner = activateResolveCache();
 			originalHandler = currentHandler;
 
 			if (contains(dataType)) {
@@ -1284,14 +1101,16 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 					resolvedDataType = resolveDataTypeNoSource(dataType);
 				}
 				else if (!sourceArchive.getSourceArchiveID().equals(getUniversalID()) &&
-					(sourceArchive.getArchiveType() == ArchiveType.PROGRAM ||
-						sourceArchive.getArchiveType() == ArchiveType.TEMPORARY)) {
-					// dataTypes from a program or temporary archive don't carry over their identity
+					!sourceArchive.getArchiveType().isValidSourceArchive()) {
+
+					// dataTypes from a invalid source (program, built-in, temporary) archive 
+					// don't carry over their identity
 					resolvedDataType = resolveDataTypeNoSource(dataType);
 				}
 				else {
 					resolvedDataType = resolveDataTypeWithSource(dataType);
 				}
+
 				cacheResolvedDataType(dataType, resolvedDataType);
 				if (resolvedDataType instanceof DataTypeDB) {
 					setCachedEquivalence((DataTypeDB) resolvedDataType, dataType);
@@ -1311,8 +1130,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 					clearEquivalenceCache();
 				}
 				currentHandler = originalHandler;
-				lock.release();
 			}
+			lock.writeLock().unlock();
 		}
 		return resolvedDataType;
 	}
@@ -1790,13 +1609,17 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	@Override
 	public void addDataTypes(Collection<DataType> dataTypes, DataTypeConflictHandler handler,
 			TaskMonitor monitor) throws CancelledException {
-		lock.acquire();
-		boolean isEquivalenceCacheOwner = activateEquivalenceCache();
-		boolean isResolveCacheOwner = activateResolveCache();
+		boolean isEquivalenceCacheOwner = false;
+		boolean isResolveCacheOwner = false;
 		// Note: extended hold time on lock may cause the GUI to become unresponsive.  Consider 
 		// releasing lock between resolves, although this exposes risk of having active resolve 
 		// queue/cache without lock.
+		// Note: we can't use auto-closeable lock here because we need to maintain the lock in
+		// the finally clause (java auto-closeable's close gets called before the finally block)
+		lock.writeLock().lock();
 		try {
+			isEquivalenceCacheOwner = activateEquivalenceCache();
+			isResolveCacheOwner = activateResolveCache();
 			monitor.setMessage("Adding datatypes...");
 			monitor.setMaximum(dataTypes.size());
 			monitor.setProgress(0);
@@ -1817,9 +1640,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			if (isEquivalenceCacheOwner) {
 				clearEquivalenceCache();
 			}
-			lock.release();
+			lock.writeLock().unlock();
 		}
-
 	}
 
 	@Override
@@ -1827,14 +1649,13 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		if (sourceArchive == null) {
 			return null;
 		}
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			SourceArchive existingArchive = getSourceArchive(sourceArchive.getSourceArchiveID());
 			if (existingArchive != null) {
 				return existingArchive;  // already have it
 			}
 			DBRecord record = sourceArchiveAdapter.createRecord(sourceArchive);
-			SourceArchive newSourceArchive = getSourceArchiveDB(record);
+			SourceArchive newSourceArchive = sourceArchiveDBCache.getCachedInstance(record);
 			invalidateSourceArchiveCache();
 			sourceArchiveAdded(newSourceArchive.getSourceArchiveID());
 			return newSourceArchive;
@@ -1842,16 +1663,12 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		catch (IOException e) {
 			dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return null;
 	}
 
 	@Override
 	public void removeSourceArchive(SourceArchive sourceArchive) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			UniversalID sourceArchiveID = sourceArchive.getSourceArchiveID();
 			if (sourceArchiveID.equals(universalID) ||
 				sourceArchiveID.equals(LOCAL_ARCHIVE_UNIVERSAL_ID)) {
@@ -1865,9 +1682,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 		catch (IOException e) {
 			dbError(e);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -1887,8 +1701,9 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	public DataType replaceDataType(DataType existingDt, DataType replacementDt,
 			boolean updateCategoryPath)
 			throws DataTypeDependencyException, IllegalArgumentException {
-		lock.acquire();
-		try {
+
+		try (Closeable c = lock.write()) {
+
 			if (!contains(existingDt)) {
 				throw new IllegalArgumentException(
 					"Datatype to replace is not contained in this datatype manager.");
@@ -1944,9 +1759,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				}
 			}
 			return replacementDt;
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -2032,7 +1844,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			// must be modified.  Use of the sortedDataTypes list is the simplest way to do this. 
 			// A copy of the list must be used since it will changed if other types get removed
 			// in the process.
-			buildSortedDataTypeList();
+			List<DataType> sortedDataTypes = getSortedDataTypes();
 			List<DataType> sortedDataTypesCopy = new ArrayList<>(sortedDataTypes);
 			for (DataType dt : sortedDataTypesCopy) {
 				dt.dataTypeReplaced(existingDt, newDt);
@@ -2102,9 +1914,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 
 		// ignore .conflict in both name and result matches
-		lock.acquire();
-		try {
-			buildSortedDataTypeList();
+		try (Closeable c = lock.read()) {
+			List<DataType> sortedDataTypes = getSortedDataTypes();
 			// Use exemplar datatype in root category without .conflict to position at start
 			// of possible matches
 			String baseName = DataTypeUtilities.getNameWithoutConflict(name);
@@ -2128,9 +1939,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				++index;
 			}
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
@@ -2147,9 +1955,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		monitor = TaskMonitor.dummyIfNull(monitor);
 
 		Pattern regexp = UserSearchUtils.createSearchPattern(name, caseSensitive);
-		lock.acquire();
-		try {
-			buildSortedDataTypeList();
+		try (Closeable c = lock.read()) {
+			List<DataType> sortedDataTypes = getSortedDataTypes();
 			for (DataType dt : sortedDataTypes) {
 				if (monitor.isCancelled()) {
 					return;
@@ -2159,9 +1966,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 					list.add(dt);
 				}
 			}
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -2286,7 +2090,14 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		if (dataTypeID == BAD_DATATYPE_ID) {
 			return BadDataType.dataType;
 		}
-		return getDataType(dataTypeID, null);
+		int tableID = getTableID(dataTypeID);
+		if (tableID == BUILT_IN) {
+			return getBuiltInDataType(dataTypeID, null);
+		}
+		if (tableID == BITFIELD) {
+			return BitFieldDBDataType.getBitFieldDataType(dataTypeID, this);
+		}
+		return dtCache.getCachedInstance(dataTypeID);
 	}
 
 	@Override
@@ -2426,20 +2237,15 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 
 	@Override
 	public boolean remove(DataType dataType) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			return removeInternal(dataType);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
 	@Override
 	public void remove(List<DataType> dataTypes, TaskMonitor monitor) throws CancelledException {
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 
 			// perform the delete in chunks so an excessively large list will still be cancellable
 			int n = dataTypes.size();
@@ -2455,9 +2261,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				int nextChunk = chunkEnd + chunk;
 				chunkEnd = n < nextChunk ? n : nextChunk;
 			}
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -2486,8 +2289,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	@Override
 	public void disassociate(DataType dataType) {
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			UniversalID oldDtID = dataType.getUniversalID();
 			SourceArchive sourceArchive = dataType.getSourceArchive();
 			sourceArchive = resolveSourceArchive(sourceArchive);
@@ -2515,9 +2317,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			}
 
 			dataTypeChanged(dataType, false);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -2547,7 +2346,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 
 	/**
 	 * Queue a datatype to deleted in response to another datatype being deleted.
-	 * @param id datatype ID to be removed
+	 * @param dt datatype to be deleted
+	 * @param id datatype ID to be deleted
 	 */
 	protected void addDataTypeToDelete(DataType dt, long id) {
 		if (dt instanceof DataTypeDB dbDt) {
@@ -2590,7 +2390,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			// must be modified.  Use of the sortedDataTypes list is the simplest way to do this. 
 			// A copy of the list must be used since it will changed if other types get removed
 			// in the process.
-			buildSortedDataTypeList();
+			List<DataType> sortedDataTypes = getSortedDataTypes();
 			List<DataType> sortedDataTypesCopy = new ArrayList<>(sortedDataTypes);
 			for (DataType dt : sortedDataTypesCopy) {
 				dt.dataTypeDeleted(dataType);
@@ -2713,7 +2513,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		// otherwise, it probably belongs to this dataTypeManager, but it could a
 		// leftover after an undo. So make sure it really is there.
 		if (dataType instanceof DataTypeDB dtDb) {
-			return dtCache.get(dtDb.getKey()) == dataType && !dtDb.isDeleted();
+			return dtCache.getCachedInstance(dtDb.getKey()) == dataType && !dtDb.isDeleted();
 		}
 		return builtIn2IdMap.containsKey(dataType);
 	}
@@ -2725,8 +2525,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 
 	@Override
 	public Category createCategory(CategoryPath path) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			Category cat = getCategory(path);
 			if (cat != null) {
 				return cat;
@@ -2743,9 +2542,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			// since the name was already validated by the CategoryPath object, should not
 			// get exception here
 			throw new AssertException("Got invalid name exception here, but should be impossible.");
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -2781,9 +2577,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	}
 
 	List<DataType> getDataTypesInCategory(long categoryID) {
-		lock.acquire();
 		ArrayList<DataType> list = new ArrayList<>();
-		try {
+		try (Closeable c = lock.read()) {
 			Field[] ids = builtinAdapter.getRecordIdsInCategory(categoryID);
 			getDataTypes(ids, list);
 
@@ -2809,9 +2604,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		catch (IOException e) {
 			errHandler.dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return list;
 	}
 
@@ -2822,9 +2614,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 
 	@Override
 	public int getDataTypeCount(boolean includePointersAndArrays) {
-		lock.acquire();
-		try {
-			buildSortedDataTypeList();
+		try (Closeable c = lock.read()) {
+			List<DataType> sortedDataTypes = getSortedDataTypes();
 			int count = sortedDataTypes.size();
 			if (includePointersAndArrays) {
 				return count;
@@ -2835,9 +2626,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				}
 			}
 			return count;
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -2855,43 +2643,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		return (int) (dataID >> DATA_TYPE_KIND_SHIFT);
 	}
 
-	private DataType getDataType(long dataTypeID, DBRecord record) {
-		int tableId = getTableID(dataTypeID);
-		DataType dt = null;
-		switch (tableId) {
-			case BUILT_IN:
-				dt = getBuiltInDataType(dataTypeID, record);
-				break;
-			case COMPOSITE:
-				dt = getCompositeDataType(dataTypeID, record);
-				break;
-			case ARRAY:
-				dt = getArrayDataType(dataTypeID, record);
-				break;
-			case POINTER:
-				dt = getPointerDataType(dataTypeID, record);
-				break;
-			case TYPEDEF:
-				dt = getTypedefDataType(dataTypeID, record);
-				break;
-			case FUNCTION_DEF:
-				dt = getFunctionDefDataType(dataTypeID, record);
-				break;
-			case ENUM:
-				dt = getEnumDataType(dataTypeID, record);
-				break;
-			case BITFIELD:
-				dt = BitFieldDBDataType.getBitFieldDataType(dataTypeID, this);
-				break;
-			default:
-				return null;
-		}
-		return dt;
-	}
-
 	private DataType getBuiltInDataType(long dataTypeID, DBRecord record) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			DataType dt = builtInMap.get(dataTypeID);
 			if (dt != null) {
 				return dt;
@@ -2905,14 +2658,14 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			}
 
 			long catID = record.getLongValue(BuiltinDBAdapter.BUILT_IN_CAT_COL);
-			CategoryDB catDB = getCategoryDB(catID);
+			CategoryDB catDB = catCache.getCachedInstance(catID);
 			CategoryPath catPath = catDB.getCategoryPath();
 			String classPath = record.getString(BuiltinDBAdapter.BUILT_IN_CLASSNAME_COL);
 			String name = record.getString(BuiltinDBAdapter.BUILT_IN_NAME_COL);
 			try {
-				Class<? extends BuiltInDataType> c;
+				Class<? extends BuiltInDataType> clazz;
 				try {
-					c = ClassSearcher.forNameSafe(classPath, BuiltInDataType.class,
+					clazz = ClassSearcher.forNameSafe(classPath, BuiltInDataType.class,
 						getClass().getClassLoader());
 				}
 				catch (ClassNotFoundException | NoClassDefFoundError e) {
@@ -2922,7 +2675,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 						throw e;
 					}
 					try {
-						c = ClassSearcher.forNameSafe(newClassPath, BuiltInDataType.class,
+						clazz = ClassSearcher.forNameSafe(newClassPath, BuiltInDataType.class,
 							getClass().getClassLoader());
 					}
 					catch (ClassNotFoundException e1) {
@@ -2930,7 +2683,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 					}
 				}
 
-				BuiltInDataType bdt = c.getDeclaredConstructor().newInstance();
+				BuiltInDataType bdt = clazz.getDeclaredConstructor().newInstance();
 				bdt.setName(name);
 				bdt.setCategoryPath(catPath);
 
@@ -2969,9 +2722,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		catch (IOException e) {
 			errHandler.dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return null;
 	}
 
@@ -2985,155 +2735,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 		// restrict to non-TypeDefSettingsDefinitions which are defined for the datatype
 		return def != null && !(def instanceof TypeDefSettingsDefinition);
-	}
-
-	private Enum getEnumDataType(long dataTypeID, DBRecord record) {
-		lock.acquire();
-		try {
-			EnumDB enu = (EnumDB) dtCache.get(dataTypeID);
-			if (enu == null) {
-				if (record == null) {
-					record = enumAdapter.getRecord(dataTypeID);
-				}
-				if (record != null) {
-					enu = new EnumDB(this, dtCache, enumAdapter, enumValueAdapter, record);
-				}
-			}
-			return enu;
-		}
-		catch (IOException e) {
-			errHandler.dbError(e);
-		}
-		finally {
-			lock.release();
-		}
-		return null;
-	}
-
-	private Composite getCompositeDataType(long dataTypeID, DBRecord record) {
-		lock.acquire();
-		try {
-			CompositeDB comp = (CompositeDB) dtCache.get(dataTypeID);
-			if (comp == null) {
-				if (record == null) {
-					record = compositeAdapter.getRecord(dataTypeID);
-				}
-				if (record != null) {
-					if (record.getBooleanValue(CompositeDBAdapter.COMPOSITE_IS_UNION_COL)) {
-						comp =
-							new UnionDB(this, dtCache, compositeAdapter, componentAdapter, record);
-					}
-					else {
-						comp = new StructureDB(this, dtCache, compositeAdapter, componentAdapter,
-							record);
-					}
-				}
-			}
-			return comp;
-		}
-		catch (IOException e) {
-			errHandler.dbError(e);
-		}
-		finally {
-			lock.release();
-		}
-		return null;
-	}
-
-	private TypeDef getTypedefDataType(long dataTypeID, DBRecord record) {
-		lock.acquire();
-		try {
-			TypedefDB typeDB = (TypedefDB) dtCache.get(dataTypeID);
-			if (typeDB == null) {
-				if (record == null) {
-					record = typedefAdapter.getRecord(dataTypeID);
-				}
-				if (record != null) {
-					typeDB = new TypedefDB(this, dtCache, typedefAdapter, record);
-				}
-			}
-			return typeDB;
-		}
-		catch (IOException e) {
-			errHandler.dbError(e);
-		}
-		finally {
-			lock.release();
-		}
-		return null;
-	}
-
-	private Array getArrayDataType(long dataTypeID, DBRecord record) {
-		lock.acquire();
-		try {
-			ArrayDB arrayDB = (ArrayDB) dtCache.get(dataTypeID);
-			if (arrayDB == null) {
-				if (record == null) {
-					record = arrayAdapter.getRecord(dataTypeID);
-				}
-				if (record != null) {
-					arrayDB = new ArrayDB(this, dtCache, arrayAdapter, record);
-				}
-			}
-			return arrayDB;
-		}
-		catch (IOException e) {
-			errHandler.dbError(e);
-
-		}
-		finally {
-			lock.release();
-		}
-		return null;
-	}
-
-	private Pointer getPointerDataType(long dataTypeID, DBRecord record) {
-		lock.acquire();
-		try {
-			PointerDB ptrDB = (PointerDB) dtCache.get(dataTypeID);
-			if (ptrDB == null) {
-				if (record == null) {
-					record = pointerAdapter.getRecord(dataTypeID);
-				}
-				if (record != null) {
-					ptrDB = new PointerDB(this, dtCache, pointerAdapter, record);
-				}
-			}
-			return ptrDB;
-		}
-		catch (IOException e) {
-			errHandler.dbError(e);
-
-		}
-		finally {
-			lock.release();
-		}
-		return null;
-	}
-
-	private FunctionDefinition getFunctionDefDataType(long dataTypeID, DBRecord record) {
-		lock.acquire();
-		try {
-			FunctionDefinitionDB funDef = (FunctionDefinitionDB) dtCache.get(dataTypeID);
-			if (funDef == null) {
-				if (record == null) {
-					record = functionDefAdapter.getRecord(dataTypeID);
-				}
-				if (record != null) {
-					funDef = new FunctionDefinitionDB(this, dtCache, functionDefAdapter,
-						paramAdapter, record);
-				}
-			}
-			return funDef;
-		}
-		catch (IOException e) {
-			errHandler.dbError(e);
-
-		}
-		finally {
-			lock.release();
-		}
-		return null;
 	}
 
 	private DataType createDataType(DataType dt, String name, SourceArchive sourceArchive,
@@ -3220,7 +2821,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				struct.getStoredMinimumAlignment());
 
 			StructureDB structDB =
-				new StructureDB(this, dtCache, compositeAdapter, componentAdapter, record);
+				new StructureDB(this, compositeAdapter, componentAdapter, record);
+			dtCache.add(structDB);
 
 			// Make sure category knows about structure before replace is performed
 			category.dataTypeAdded(structDB);
@@ -3264,7 +2866,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 		DBRecord record = typedefAdapter.createRecord(getID(dataType), name, flags, cat.getID(),
 			sourceArchiveIdValue, universalIdValue, typedef.getLastChangeTime());
-		TypedefDB typedefDB = new TypedefDB(this, dtCache, typedefAdapter, record);
+		TypedefDB typedefDB = new TypedefDB(this, typedefAdapter, record);
+		dtCache.add(typedefDB);
 
 		// Copy TypeDef settings from original
 		DataTypeSettingsDB settings = (DataTypeSettingsDB) typedefDB.getDefaultSettings();
@@ -3288,8 +2891,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			DBRecord record = compositeAdapter.createRecord(name, null, true, category.getID(), 0,
 				-1, sourceArchiveIdValue, universalIdValue, union.getLastChangeTime(),
 				union.getStoredPackingValue(), union.getStoredMinimumAlignment());
-			UnionDB unionDB =
-				new UnionDB(this, dtCache, compositeAdapter, componentAdapter, record);
+			UnionDB unionDB = new UnionDB(this, compositeAdapter, componentAdapter, record);
+			dtCache.add(unionDB);
 
 			// Make sure category knows about union before replace is performed
 			category.dataTypeAdded(unionDB);
@@ -3324,7 +2927,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			enumValueAdapter.createRecord(enumID, enumName, enumm.getValue(enumName),
 				enumm.getComment(enumName));
 		}
-		EnumDB enumDB = new EnumDB(this, dtCache, enumAdapter, enumValueAdapter, record);
+		EnumDB enumDB = new EnumDB(this, enumAdapter, enumValueAdapter, record);
+		dtCache.add(enumDB);
 		return enumDB;
 	}
 
@@ -3337,7 +2941,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		long dataTypeID = getResolvedID(dt);
 
 		DBRecord record = pointerAdapter.createRecord(dataTypeID, cat.getID(), length);
-		PointerDB ptrDB = new PointerDB(this, dtCache, pointerAdapter, record);
+		PointerDB ptrDB = new PointerDB(this, pointerAdapter, record);
+		dtCache.add(ptrDB);
 		if (dt != null) {
 			dt.addParent(ptrDB);
 		}
@@ -3358,7 +2963,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		DBRecord record =
 			arrayAdapter.createRecord(dataTypeID, numElements, elementLength, cat.getID());
 		addParentChildRecord(record.getKey(), dataTypeID);
-		ArrayDB arrayDB = new ArrayDB(this, dtCache, arrayAdapter, record);
+		ArrayDB arrayDB = new ArrayDB(this, arrayAdapter, record);
+		dtCache.add(arrayDB);
 		dt.addParent(arrayDB);
 		return arrayDB;
 	}
@@ -3433,46 +3039,43 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		return getSourceArchive(getUniversalID());
 	}
 
-	private synchronized SourceArchive getSourceArchiveFromCache(UniversalID sourceID) {
-		populateSourceArchiveCache();
+	private SourceArchive getSourceArchiveFromCache(UniversalID sourceID) {
+		Map<UniversalID, SourceArchive> sourceArchiveMap = getSourceArchiveMap();
 		return sourceArchiveMap.get(sourceID);
 	}
 
-	private synchronized void invalidateSourceArchiveCache() {
-		sourceArchiveMap = null;
+	private void invalidateSourceArchiveCache() {
+		cachedSourceArchiveMap = null;
 	}
 
-	private synchronized Collection<SourceArchive> getSourceArchivesFromCache() {
-		populateSourceArchiveCache();
+	private Collection<SourceArchive> getSourceArchivesFromCache() {
+		Map<UniversalID, SourceArchive> sourceArchiveMap = getSourceArchiveMap();
 		return new ArrayList<>(sourceArchiveMap.values());
 	}
 
-	private synchronized void populateSourceArchiveCache() {
-		if (sourceArchiveMap != null) {
-			return;
+	private Map<UniversalID, SourceArchive> getSourceArchiveMap() {
+		Map<UniversalID, SourceArchive> map = cachedSourceArchiveMap;
+		if (map == null) {
+			map = buildSourceArchiveMap();
+			cachedSourceArchiveMap = map;
 		}
+		return map;
+	}
+
+	private Map<UniversalID, SourceArchive> buildSourceArchiveMap() {
 		Map<UniversalID, SourceArchive> archiveMap = new HashMap<>();
 		archiveMap.put(BUILT_IN_ARCHIVE_UNIVERSAL_ID, BuiltInSourceArchive.INSTANCE);
 		try {
 			List<DBRecord> records = sourceArchiveAdapter.getRecords();
 			for (DBRecord record : records) {
-				SourceArchive sourceArchive = getSourceArchiveDB(record);
+				SourceArchive sourceArchive = sourceArchiveDBCache.getCachedInstance(record);
 				archiveMap.put(sourceArchive.getSourceArchiveID(), sourceArchive);
 			}
-
 		}
 		catch (IOException e) {
 			dbError(e);
 		}
-		sourceArchiveMap = archiveMap;
-	}
-
-	private SourceArchiveDB getSourceArchiveDB(DBRecord record) {
-		SourceArchiveDB archive = sourceArchiveDBCache.get(record.getKey());
-		if (archive == null) {
-			archive = new SourceArchiveDB(this, sourceArchiveDBCache, sourceArchiveAdapter, record);
-		}
-		return archive;
+		return Collections.unmodifiableMap(archiveMap);
 	}
 
 	@Override
@@ -3537,7 +3140,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				callingConventionId, sourceArchiveIdValue, universalIdValue,
 				funDef.getLastChangeTime());
 			FunctionDefinitionDB funDefDb =
-				new FunctionDefinitionDB(this, dtCache, functionDefAdapter, paramAdapter, record);
+				new FunctionDefinitionDB(this, functionDefAdapter, paramAdapter, record);
+			dtCache.add(funDefDb);
 
 			// Make sure category knows about function definition before args/return resolved
 			cat.dataTypeAdded(funDefDb);
@@ -3593,7 +3197,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			try {
 				while (it.hasNext()) {
 					DBRecord rec = it.next();
-					DataType dt = getDataType(rec.getKey(), rec);
+					DataType dt = dtCache.getCachedInstance(rec);
 					if (predicate.test(dt)) {
 						nextDataType = (T) dt;
 						return;
@@ -3632,14 +3236,12 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			if (!(dt instanceof Array) && !(dt instanceof Pointer)) {
 				for (Field arrayId : arrayAdapter.getRecordIdsInCategory(oldCatId)) {
 					long id = arrayId.getLongValue();
-					DBRecord rec = arrayAdapter.getRecord(id);
-					ArrayDB array = (ArrayDB) getDataType(id, rec);
+					ArrayDB array = (ArrayDB) dtCache.getCachedInstance(id);
 					array.updatePath(dt);
 				}
 				for (Field ptrId : pointerAdapter.getRecordIdsInCategory(oldCatId)) {
 					long id = ptrId.getLongValue();
-					DBRecord rec = pointerAdapter.getRecord(id);
-					PointerDB ptr = (PointerDB) getDataType(id, rec);
+					PointerDB ptr = (PointerDB) dtCache.getCachedInstance(id);
 					ptr.updatePath(dt);
 				}
 			}
@@ -3647,8 +3249,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			// only affects those with auto-naming which must follow category change
 			for (Field ptrId : typedefAdapter.getRecordIdsInCategory(oldCatId)) {
 				long id = ptrId.getLongValue();
-				DBRecord rec = typedefAdapter.getRecord(id);
-				TypedefDB td = (TypedefDB) getDataType(id, rec);
+				TypedefDB td = (TypedefDB) dtCache.getCachedInstance(id);
 				td.updatePath(dt);
 			}
 		}
@@ -3661,25 +3262,17 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 
 	@Override
 	public Iterator<DataType> getAllDataTypes() {
-		lock.acquire();
-		try {
-			buildSortedDataTypeList();
+		try (Closeable c = lock.read()) {
+			List<DataType> sortedDataTypes = getSortedDataTypes();
 			return new ArrayList<>(sortedDataTypes).iterator();
-		}
-		finally {
-			lock.release();
 		}
 	}
 
 	@Override
 	public void getAllDataTypes(List<DataType> list) {
-		lock.acquire();
-		try {
-			buildSortedDataTypeList();
+		try (Closeable c = lock.read()) {
+			List<DataType> sortedDataTypes = getSortedDataTypes();
 			list.addAll(sortedDataTypes);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -3719,21 +3312,15 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	}
 
 	public void dispose() {
-		sortedDataTypes = null;
+		lazySortedDataTypes = null;
 		enumValueMap = null;
-	}
-
-	@Override
-	public void close() {
-		dispose();
 	}
 
 	/**
 	 * Invalidates the cache.
 	 */
 	public void invalidateCache() {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			callingConventionAdapter.invalidateCache();
 			knownCallingConventions = null;
 			definedCallingConventions = null;
@@ -3746,14 +3333,11 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			catCache.invalidate();
 			settingsCache.clear();
 			settingsAdapter.invalidateNameCache();
-			sortedDataTypes = null;
+			lazySortedDataTypes = null;
 			enumValueMap = null;
 			fireInvalidated();
 			updateFavorites();
 			idsToDataTypeMap.clear();
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -3853,8 +3437,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	}
 
 	List<DataType> getParentDataTypes(long dataTypeId) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			Set<Long> parentIds = parentChildAdapter.getParentIds(dataTypeId);
 			// NOTE: Use of Set for containing datatypes is avoided due to the excessive
 			// overhead of DataType.equals
@@ -3874,9 +3457,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		catch (IOException e) {
 			dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return null;
 	}
 
@@ -3889,8 +3469,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 */
 	@Deprecated
 	Set<DataType> getParentDataTypeSet(long dataTypeId) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			Set<Long> parentIds = parentChildAdapter.getParentIds(dataTypeId);
 			Set<DataType> dts = new HashSet<>();
 			for (long id : parentIds) {
@@ -3908,9 +3487,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		catch (IOException e) {
 			dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		return null;
 	}
 
@@ -3926,14 +3502,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	}
 
 	private void attemptRecordRemovalForParent(long parentKey) throws IOException {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			if (dbHandle.isTransactionActive()) {
 				parentChildAdapter.removeAllRecordsForParent(parentKey);
 			}
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -4044,8 +3616,13 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	protected void dataTypeNameChanged(DataType dt, String oldName) {
 		CategoryDB category = (CategoryDB) getCategory(dt.getCategoryPath());
 		category.dataTypeRenamed(dt, oldName);
-		if (sortedDataTypes != null) {
-			Collections.sort(sortedDataTypes, nameComparator);
+
+		// we assume we have the write lock here
+		if (!lock.isWriteLockedByCurrentThread()) {
+			throw new AssertException("Attempted to modify sorted datatypes without write lock");
+		}
+		if (lazySortedDataTypes != null) {
+			Collections.sort(lazySortedDataTypes, nameComparator);
 		}
 		updateLastChangeTime();
 		setDirtyFlag(dt);
@@ -4106,13 +3683,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	@Override
 	public DataType getDataType(SourceArchive sourceArchive, UniversalID datatypeID) {
 		UniversalID sourceID = sourceArchive == null ? null : sourceArchive.getSourceArchiveID();
-		lock.acquire();
-		try {
-			return idsToDataTypeMap.getDataType(sourceID, datatypeID);
-		}
-		finally {
-			lock.release();
-		}
+		return lock.withRead(() -> idsToDataTypeMap.getDataType(sourceID, datatypeID));
 	}
 
 	@Override
@@ -4134,9 +3705,8 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	}
 
 	private DataType findDataTypeForIDs(UniversalID sourceID, UniversalID datatypeID) {
-		lock.acquire();
 		DBRecord record = null;
-		try {
+		try (Closeable c = lock.read()) {
 			record = typedefAdapter.getRecordWithIDs(sourceID, datatypeID);
 			if (record == null) {
 				record = compositeAdapter.getRecordWithIDs(sourceID, datatypeID);
@@ -4151,18 +3721,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		catch (IOException e) {
 			errHandler.dbError(e);
 		}
-		finally {
-			lock.release();
-		}
 		if (record != null) {
-			return getDataType(record.getKey(), record);
+			return dtCache.getCachedInstance(record);
 		}
 		return null;
-	}
-
-	@Override
-	public AddressMap getAddressMap() {
-		return addrMap;
 	}
 
 	@Override
@@ -4197,17 +3759,13 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		else if (id == UNKNOWN_CALLING_CONVENTION_ID) {
 			return CompilerSpec.CALLING_CONVENTION_unknown;
 		}
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			String callingConvention = callingConventionAdapter.getCallingConventionName(id);
 			return callingConvention != null ? callingConvention
 					: CompilerSpec.CALLING_CONVENTION_unknown;
 		}
 		catch (IOException e) {
 			dbError(e);
-		}
-		finally {
-			lock.release();
 		}
 		return null;
 	}
@@ -4237,8 +3795,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			return DEFAULT_CALLING_CONVENTION_ID;
 		}
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			// If restrictive only permit a name which is known
 			if (restrictive &&
 				GenericCallingConvention
@@ -4253,9 +3810,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 		catch (IOException e) {
 			dbError(e);
-		}
-		finally {
-			lock.release();
 		}
 		return UNKNOWN_CALLING_CONVENTION_ID;
 	}
@@ -4299,13 +3853,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 
 	@Override
 	public Collection<String> getDefinedCallingConventionNames() {
-		lock.acquire();
-		try {
-			return new ArrayList<>(getDefinedCallingConventionSet());
-		}
-		finally {
-			lock.release();
-		}
+		return lock.withRead(() -> new ArrayList<>(getDefinedCallingConventionSet()));
 	}
 
 	private Set<String> getKnownCallingConventionSet() {
@@ -4335,13 +3883,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 
 	@Override
 	public Collection<String> getKnownCallingConventionNames() {
-		lock.acquire();
-		try {
-			return new ArrayList<>(getKnownCallingConventionSet());
-		}
-		finally {
-			lock.release();
-		}
+		return lock.withRead(() -> new ArrayList<>(getKnownCallingConventionSet()));
 	}
 
 	@Override
@@ -4402,7 +3944,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			if (!rec.getBooleanValue(CompositeDBAdapter.COMPOSITE_IS_UNION_COL)) {
 				// StructureDB instantiation will perform an automatic flex-array
 				// record migration if needed.
-				new StructureDB(this, dtCache, compositeAdapter, componentAdapter, rec);
+				new StructureDB(this, compositeAdapter, componentAdapter, rec);
 			}
 		}
 
@@ -4422,7 +3964,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 				replaceSourceArchive(sourceArchive, mappedSourceArchive);
 			}
 		}
-		BuiltInDataTypeManager builtInDTM = BuiltInDataTypeManager.getDataTypeManager();
+		DataTypeManager builtInDTM = BuiltInDataTypeManager.getDataTypeManager();
 		for (String name : SourceArchiveUpgradeMap.getTypedefReplacements()) {
 			monitor.checkCancelled();
 			DataType dataType = getDataType(CategoryPath.ROOT, name);
@@ -4441,7 +3983,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	}
 
 	/**
-	 * Fixup all composites and thier components which may be affected by a data organization
+	 * Fixup all composites and their components which may be affected by a data organization
 	 * change include primitive type size changes and alignment changes.  It is highly recommended
 	 * that this program be open with exclusive access before invoking this method to avoid 
 	 * excessive merge conflicts with other users.
@@ -4450,15 +3992,11 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * updated compiler specification
 	 */
 	public void fixupComposites(TaskMonitor monitor) throws CancelledException {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			doCompositeFixup(monitor);
 		}
 		catch (IOException e) {
 			dbError(e);
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -4558,8 +4096,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			return false;
 		}
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			if (dataType instanceof Pointer || dataType instanceof Array) {
 				dataType = DataTypeUtilities.getBaseDataType(dataType);
 			}
@@ -4592,13 +4129,9 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			}
 			return success;
 		}
-		finally {
-			lock.release();
-		}
 	}
 
-	private record DedupedConflicts(int processCnt, int replaceCnt) {
-	}
+	private record DedupedConflicts(int processCnt, int replaceCnt) {}
 
 	private DedupedConflicts doDedupeConflicts(DataType dataType) {
 
@@ -4638,8 +4171,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * @throws CancelledException if task is cancelled
 	 */
 	public void dedupeAllConflicts(TaskMonitor monitor) throws CancelledException {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			List<DataType> conflictList = new ArrayList<>();
 			int total = popuplateConflictList(conflictList, getRootCategory());
 			monitor.initialize(total);
@@ -4654,9 +4186,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			}
 			Msg.info(this, "Evaluated " + processed + " conflict types, replaced " + replacements +
 				" base type conflicts");
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -4772,7 +4301,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		if (resolveQueue == null) {
 			resolveQueue = new TreeSet<>();
 		}
-		resolveQueue.add(new ResolvePair(resolvedDt, definitionDt));
+		resolveQueue.add(new ResolvedDt(resolvedDt, definitionDt));
 	}
 
 	/**
@@ -4815,7 +4344,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 			if (resolveQueue != null) {
 				DataTypeConflictHandler handler = getDependencyConflictHandler();
 				while (!resolveQueue.isEmpty()) {
-					ResolvePair resolvePair = resolveQueue.pollFirst();
+					ResolvedDt resolvePair = resolveQueue.pollFirst();
 					DataTypeDB resolvedDt = resolvePair.resolvedDt;
 					try {
 						if (!resolvedDt.isDeleted()) {
@@ -4859,7 +4388,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * Check for cached equivalence of a type contained within this datatype manager
 	 * against another datatype. Every call to this method when {@code null} is
 	 * returned must be following by an invocation of
-	 * {@link #putCachedEquivalence(DataTypeDB, DataType, boolean)} once an
+	 * {@link #putCachedEquivalence(DataTypeDB, DataType, Boolean)} once an
 	 * equivalence determination has been made. The number of outstanding calls to
 	 * this method will be tracked. When the outstanding call count returns to zero
 	 * the cache will be cleared. <br>
@@ -4872,7 +4401,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * @return true, false or {@code null} if unknown. A {@code null} value mandates
 	 *         that the caller make a determination and put the result into the
 	 *         cache when known (see
-	 *         {@link #putCachedEquivalence(DataTypeDB, DataType, boolean)}.
+	 *         {@link #putCachedEquivalence(DataTypeDB, DataType, Boolean)}.
 	 */
 	Boolean getCachedEquivalence(DataTypeDB dataTypeDB, DataType dataType) {
 		EquivalenceCache cache = equivalenceCache.get();
@@ -4913,6 +4442,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		cache.setValue(key);
 	}
 
+	CategoryDB getCategoryDB(long id) {
+		return catCache.getCachedInstance(id);
+	}
+
 	/**
 	 * Cache the result of {@link DataTypeDB#isEquivalent(DataType)} for select
 	 * implementations (e.g., {@link StructureDB}, {@link UnionDB}, and
@@ -4926,7 +4459,11 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * @param isEquivalent true or false result from
 	 *                     {@link DataTypeDB#isEquivalent(DataType)}.
 	 */
-	void putCachedEquivalence(DataTypeDB dataTypeDB, DataType dataType, boolean isEquivalent) {
+	void putCachedEquivalence(DataTypeDB dataTypeDB, DataType dataType, Boolean isEquivalent) {
+		if (isEquivalent == null) {
+			Msg.error(this, "IsEquivalent = null");
+			return;
+		}
 		EquivalenceCache cache = equivalenceCache.get();
 		if (cache == null) {
 			throw new IllegalStateException("equivalence cache not active - unexpected condition");
@@ -5083,21 +4620,6 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 		}
 	}
 
-	private class DbErrorHandler implements ErrorHandler {
-
-		@Override
-		public void dbError(IOException e) throws RuntimeIOException {
-
-			String message = e.getMessage();
-			if (e instanceof ClosedException) {
-				message = "Data type archive is closed: " + getName();
-				Msg.showError(this, null, "IO ERROR", message, e);
-			}
-
-			throw new RuntimeIOException(e);
-		}
-	}
-
 	/**
 	 * Diagnostic method to determine actual number of datatype records which exist.  This
 	 * may differ from the total number of datatypes reported via {@link DataTypeManager#getAllDataTypes()}
@@ -5106,24 +4628,206 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
 	 * @return total number of datatype records.
 	 */
 	int getDataTypeRecordCount() {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			return builtinAdapter.getRecordCount() + compositeAdapter.getRecordCount() +
 				arrayAdapter.getRecordCount() + pointerAdapter.getRecordCount() +
 				typedefAdapter.getRecordCount() + functionDefAdapter.getRecordCount() +
 				enumAdapter.getRecordCount();
 		}
-		finally {
-			lock.release();
+	}
+
+	private class CategoryFactory implements DbFactory<CategoryDB> {
+
+		@Override
+		public CategoryDB instantiate(long dataTypeId) {
+			if (dataTypeId == DataTypeManagerDB.ROOT_CATEGORY_ID) {
+				return root;
+			}
+			try {
+				DBRecord record = categoryAdapter.getRecord(dataTypeId);
+				return record == null ? null : instantiate(record);
+			}
+			catch (IOException e) {
+				dbError(e);
+				return null;
+			}
+		}
+
+		@Override
+		public CategoryDB instantiate(DBRecord rec) {
+			long parentID = rec.getLongValue(CategoryDBAdapter.CATEGORY_PARENT_COL);
+			CategoryDB parent = catCache.getCachedInstance(parentID);
+			String name = rec.getString(CategoryDBAdapter.CATEGORY_NAME_COL);
+			return new CategoryDB(DataTypeManagerDB.this, rec.getKey(), parent, name);
 		}
 	}
 
-}
+	private class ArchiveFactory implements DbFactory<SourceArchiveDB> {
+		@Override
+		public SourceArchiveDB instantiate(long key) {
+			try {
+				DBRecord record = sourceArchiveAdapter.getRecord(key);
+				return record == null ? null : instantiate(record);
+			}
+			catch (IOException e) {
+				dbError(e);
+				return null;
+			}
+		}
 
-class CategoryCache extends FixedSizeHashMap<String, Category> {
-	private static final int CACHE_SIZE = 100;
+		@Override
+		public SourceArchiveDB instantiate(DBRecord record) {
+			return new SourceArchiveDB(DataTypeManagerDB.this, sourceArchiveAdapter, record);
+		}
 
-	CategoryCache() {
-		super(CACHE_SIZE, CACHE_SIZE);
+	}
+
+	private class DtFactory implements DbFactory<DataTypeDB> {
+
+		@Override
+		public DataTypeDB instantiate(long key) {
+			return doInstantiate(key, null);
+		}
+
+		@Override
+		public DataTypeDB instantiate(DBRecord record) {
+			if (record == null) {
+				return null;
+			}
+			return doInstantiate(record.getKey(), record);
+		}
+
+		private DataTypeDB doInstantiate(long dataTypeID, DBRecord rec) {
+			try {
+				int tableId = getTableID(dataTypeID);
+				switch (tableId) {
+					case COMPOSITE:
+						return instantiateCompositeDataType(dataTypeID, rec);
+					case ARRAY:
+						return instantiateArrayDataType(dataTypeID, rec);
+					case POINTER:
+						return instantiatePointerDataType(dataTypeID, rec);
+					case TYPEDEF:
+						return instantiateTypedefDataType(dataTypeID, rec);
+					case FUNCTION_DEF:
+						return instantiateFunctionDefDataType(dataTypeID, rec);
+					case ENUM:
+						return instantiateEnumDataType(dataTypeID, rec);
+					case BUILT_IN:
+					case BITFIELD:
+						// these types are not DB objects and are not cached
+					default:
+						return null;
+				}
+			}
+			catch (IOException e) {
+				dbError(e);
+				return null;
+			}
+		}
+
+		private CompositeDB instantiateCompositeDataType(long dataTypeID, DBRecord record)
+				throws IOException {
+
+			if (record == null) {
+				record = compositeAdapter.getRecord(dataTypeID);
+			}
+			if (record == null) {
+				return null;
+			}
+			if (record.getBooleanValue(CompositeDBAdapter.COMPOSITE_IS_UNION_COL)) {
+				return new UnionDB(DataTypeManagerDB.this, compositeAdapter, componentAdapter,
+					record);
+			}
+			return new StructureDB(DataTypeManagerDB.this, compositeAdapter, componentAdapter,
+				record);
+		}
+
+		private ArrayDB instantiateArrayDataType(long dataTypeID, DBRecord record)
+				throws IOException {
+			if (record == null) {
+				record = arrayAdapter.getRecord(dataTypeID);
+			}
+			if (record == null) {
+				return null;
+			}
+			return new ArrayDB(DataTypeManagerDB.this, arrayAdapter, record);
+		}
+
+		private PointerDB instantiatePointerDataType(long dataTypeID, DBRecord record)
+				throws IOException {
+			if (record == null) {
+				record = pointerAdapter.getRecord(dataTypeID);
+			}
+			if (record == null) {
+				return null;
+			}
+			return new PointerDB(DataTypeManagerDB.this, pointerAdapter, record);
+		}
+
+		private TypedefDB instantiateTypedefDataType(long dataTypeID, DBRecord record)
+				throws IOException {
+			if (record == null) {
+				record = typedefAdapter.getRecord(dataTypeID);
+			}
+			if (record == null) {
+				return null;
+			}
+			return new TypedefDB(DataTypeManagerDB.this, typedefAdapter, record);
+		}
+
+		private FunctionDefinitionDB instantiateFunctionDefDataType(long dataTypeID,
+				DBRecord record)
+				throws IOException {
+			if (record == null) {
+				record = functionDefAdapter.getRecord(dataTypeID);
+			}
+			if (record == null) {
+				return null;
+			}
+			return new FunctionDefinitionDB(DataTypeManagerDB.this, functionDefAdapter,
+				paramAdapter, record);
+		}
+
+		private EnumDB instantiateEnumDataType(long dataTypeID, DBRecord record)
+				throws IOException {
+			if (record == null) {
+				record = enumAdapter.getRecord(dataTypeID);
+			}
+			if (record == null) {
+				return null;
+			}
+			return new EnumDB(DataTypeManagerDB.this, enumAdapter, enumValueAdapter, record);
+		}
+	}
+
+	private static record ResolvedDt(DataTypeDB resolvedDt, DataType definitionDt)
+			implements Comparable<ResolvedDt> {
+
+		@Override
+		public int hashCode() {
+			long value = resolvedDt.getKey();
+			return (int) (value ^ (value >>> 32));
+		}
+
+		@Override
+		public boolean equals(Object obj) {
+			if (this == obj) {
+				return true;
+			}
+			if (obj == null) {
+				return false;
+			}
+			if (getClass() != obj.getClass()) {
+				return false;
+			}
+			ResolvedDt other = (ResolvedDt) obj;
+			return resolvedDt.getKey() == other.resolvedDt.getKey();
+		}
+
+		@Override
+		public int compareTo(ResolvedDt o) {
+			return Long.compare(resolvedDt.getKey(), o.resolvedDt.getKey());
+		}
 	}
 }

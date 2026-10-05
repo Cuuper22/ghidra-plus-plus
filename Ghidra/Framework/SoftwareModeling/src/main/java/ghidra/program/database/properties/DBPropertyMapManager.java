@@ -24,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import db.*;
 import ghidra.framework.data.OpenMode;
-import ghidra.program.database.ManagerDB;
+import ghidra.program.database.ProgramDBModule;
 import ghidra.program.database.ProgramDB;
 import ghidra.program.database.bookmark.OldBookmark;
 import ghidra.program.database.map.AddressMap;
@@ -35,6 +35,7 @@ import ghidra.program.model.util.*;
 import ghidra.program.util.ChangeManager;
 import ghidra.program.util.ProgramEvent;
 import ghidra.util.*;
+import ghidra.util.Lock.Closeable;
 import ghidra.util.exception.*;
 import ghidra.util.map.TypeMismatchException;
 import ghidra.util.task.TaskMonitor;
@@ -42,7 +43,7 @@ import ghidra.util.task.TaskMonitor;
 /**
  * Manages generic address keyed properties.
  */
-public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
+public class DBPropertyMapManager implements PropertyMapManager, ProgramDBModule {
 
 	private DBHandle dbHandle;
 	private ProgramDB program;
@@ -103,20 +104,19 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 	}
 
 	@Override
-	public void setProgram(ProgramDB program) {
+	public void setDomainObject(ProgramDB program) {
 		this.program = program;
 	}
 
 	@Override
-	public void programReady(OpenMode openMode, int currentRevision, TaskMonitor monitor)
+	public void domainObjectReady(OpenMode openMode, int currentRevision, TaskMonitor monitor)
 			throws IOException, CancelledException {
 		// Nothing to do
 	}
 
 	@Override
 	public void invalidateCache(boolean all) throws IOException {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			for (PropertyMapDB<?> map : propertyMapCache.values()) {
 				map.invalidate();
 			}
@@ -129,9 +129,6 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 		}
 		catch (VersionException e) {
 			throw new AssertException();
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -249,8 +246,7 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 	@Override
 	public IntPropertyMap createIntPropertyMap(String propertyName) throws DuplicateNameException {
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			if (propertyMapCache.containsKey(propertyName)) {
 				throw new DuplicateNameException();
 			}
@@ -272,9 +268,6 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 			}
 			return pm;
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	/**
@@ -287,8 +280,7 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 	public LongPropertyMap createLongPropertyMap(String propertyName)
 			throws DuplicateNameException {
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			if (propertyMapCache.containsKey(propertyName)) {
 				throw new DuplicateNameException();
 			}
@@ -311,9 +303,6 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 			return pm;
 
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	/**
@@ -326,8 +315,7 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 	public StringPropertyMap createStringPropertyMap(String propertyName)
 			throws DuplicateNameException {
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			if (propertyMapCache.containsKey(propertyName)) {
 				throw new DuplicateNameException();
 			}
@@ -349,17 +337,13 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 			}
 			return pm;
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
 	public <T extends Saveable> ObjectPropertyMap<T> createObjectPropertyMap(String propertyName,
 			Class<T> objectClass) throws DuplicateNameException {
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			if (propertyMapCache.containsKey(propertyName)) {
 				throw new DuplicateNameException();
 			}
@@ -382,9 +366,6 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 			}
 			return pm;
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	/**
@@ -397,8 +378,7 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 	public VoidPropertyMap createVoidPropertyMap(String propertyName)
 			throws DuplicateNameException {
 
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			if (propertyMapCache.containsKey(propertyName)) {
 				throw new DuplicateNameException();
 			}
@@ -419,9 +399,6 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 				program.dbError(e);
 			}
 			return pm;
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -512,8 +489,7 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 
 	@Override
 	public boolean removePropertyMap(String propertyName) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			PropertyMapDB<?> pm = propertyMapCache.remove(propertyName);
 			if (pm != null) {
 				pm.delete();
@@ -528,37 +504,26 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 			program.dbError(e);
 
 		}
-		finally {
-			lock.release();
-		}
 		return false;
 	}
 
 	@Override
 	public Iterator<String> propertyManagers() {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.read()) {
 			// NOTE: infrequent use expected
 			return propertyMapCache.keySet()
 					.stream()
 					.sorted() // Sort keys in natural order
 					.iterator();
 		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
 	public void removeAll(Address addr) {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			for (PropertyMapDB<?> pm : propertyMapCache.values()) {
 				pm.remove(addr);
 			}
-		}
-		finally {
-			lock.release();
 		}
 	}
 
@@ -566,30 +531,22 @@ public class DBPropertyMapManager implements PropertyMapManager, ManagerDB {
 	public void removeAll(Address startAddr, Address endAddr, TaskMonitor monitor)
 			throws CancelledException {
 		AddressRange.checkValidRange(startAddr, endAddr);
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			for (PropertyMapDB<?> pm : propertyMapCache.values()) {
 				monitor.checkCancelled();
 				pm.removeRange(startAddr, endAddr);
 			}
-		}
-		finally {
-			lock.release();
 		}
 	}
 
 	@Override
 	public void moveAddressRange(Address fromAddr, Address toAddr, long length, TaskMonitor monitor)
 			throws CancelledException {
-		lock.acquire();
-		try {
+		try (Closeable c = lock.write()) {
 			for (PropertyMapDB<?> pm : propertyMapCache.values()) {
 				monitor.checkCancelled();
 				pm.moveRange(fromAddr, fromAddr.add(length - 1), toAddr);
 			}
-		}
-		finally {
-			lock.release();
 		}
 	}
 

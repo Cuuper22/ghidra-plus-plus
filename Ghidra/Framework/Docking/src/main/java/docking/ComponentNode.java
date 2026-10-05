@@ -274,7 +274,15 @@ class ComponentNode extends Node {
 		}
 		else if (count > 1) {
 			JTabbedPane tabbedPane =
-				new JTabbedPane(SwingConstants.BOTTOM, JTabbedPane.SCROLL_TAB_LAYOUT);
+				new JTabbedPane(SwingConstants.BOTTOM, JTabbedPane.SCROLL_TAB_LAYOUT) {
+					@Override
+					public String getTitleAt(int index) {
+						if (index < 0) {
+							return "No Title";
+						}
+						return super.getTitleAt(index);
+					}
+				};
 			setupFocusUpdateListeners(tabbedPane);
 			comp = tabbedPane;
 
@@ -581,7 +589,7 @@ class ComponentNode extends Node {
 		pane.setIconAt(index, icon);
 
 		String tabText = placeholder.getTabText();
-		String fullTitle = placeholder.getTitle();
+		String fullTitle = placeholder.getFullTitle();
 		renderer.setTitle(tabText, fullTitle);
 		pane.setTitleAt(index, tabText);
 	}

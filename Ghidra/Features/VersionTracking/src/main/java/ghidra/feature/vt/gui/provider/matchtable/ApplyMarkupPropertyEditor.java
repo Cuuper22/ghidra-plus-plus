@@ -51,6 +51,9 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 	// help tooltips
 	private static final String DATA_MATCH_DATA_TYPE_TOOLTIP =
 		"<html>The apply action for the <b>data type on a data match</b> when performing bulk apply operations</html>";
+	private static final String DATA_TYPE_CONFLICT_HANDLER_TOOLTIP =
+		"<html>How to resolve a conflict when the <b>data type being applied</b> already exists " +
+			"but differs in the destination program</html>";
 	private static final String LABELS_TOOLTIP =
 		"<html>The apply action for <b>labels</b> when performing bulk apply operations</html>";
 	private static final String FUNCTION_NAME_TOOLTIP =
@@ -116,9 +119,11 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 	private JComponent editorComponent;
 
 	private JLabel dataMatchDataTypeLabel;
+	private JLabel dataTypeConflictHandlerLabel;
 	private JLabel functionNameLabel;
 	private JLabel functionSignatureLabel;
 	private JLabel useFunctionNamespaceLabel;
+	private JLabel useEmptyCompositesLabel;
 	private JLabel returnTypeLabel;
 	private JLabel inlineLabel;
 	private JLabel noReturnLabel;
@@ -136,9 +141,11 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 	private JLabel postCommentsLabel;
 
 	private JComboBox<Enum<?>> dataMatchDataTypeComboBox;
+	private JComboBox<Enum<?>> dataTypeConflictHandlerComboBox;
 	private JComboBox<Enum<?>> functionNameComboBox;
 	private JComboBox<Enum<?>> functionSignatureComboBox;
 	private JCheckBox useFunctionNamespaceCheckBox;
+	private JCheckBox useEmptyCompositesCheckBox;
 	private JComboBox<Enum<?>> returnTypeComboBox;
 	private JComboBox<Enum<?>> callingConventionComboBox;
 	private JComboBox<Enum<?>> inlineComboBox;
@@ -416,6 +423,8 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 
 		panel.add(dataMatchDataTypeLabel);
 		panel.add(dataMatchDataTypeComboBox);
+		panel.add(dataTypeConflictHandlerLabel);
+		panel.add(dataTypeConflictHandlerComboBox);
 		panel.add(labelsLabel);
 		panel.add(labelsComboBox);
 		panel.add(functionNameLabel);
@@ -426,6 +435,9 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 		panel.add(useFunctionNamespaceLabel);
 		panel.add(useFunctionNamespaceCheckBox);
 
+		panel.add(useEmptyCompositesLabel);
+		panel.add(useEmptyCompositesCheckBox);
+
 		outerPanel.add(panel);
 		return outerPanel;
 	}
@@ -433,6 +445,10 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 	private void createNonCommentMarkupLabels() {
 		dataMatchDataTypeLabel = new GDLabel("Data Match Data Type", SwingConstants.RIGHT);
 		dataMatchDataTypeLabel.setToolTipText(DATA_MATCH_DATA_TYPE_TOOLTIP);
+
+		dataTypeConflictHandlerLabel =
+			new GDLabel("Data Type Conflict Handler", SwingConstants.RIGHT);
+		dataTypeConflictHandlerLabel.setToolTipText(DATA_TYPE_CONFLICT_HANDLER_TOOLTIP);
 
 		labelsLabel = new GDLabel("Labels", SwingConstants.RIGHT);
 		labelsLabel.setToolTipText(LABELS_TOOLTIP);
@@ -445,12 +461,19 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 
 		useFunctionNamespaceLabel = new GDLabel("Replace Namespace", SwingConstants.RIGHT);
 		useFunctionNamespaceLabel.setToolTipText(USE_NAMESPACE_TOOLTIP);
+
+		useEmptyCompositesLabel = new GDLabel("Use Empty Composite Types", SwingConstants.RIGHT);
+		useEmptyCompositesLabel.setToolTipText(USE_EMPTY_COMPOSITES_TOOLTIP);
 	}
 
 	private void createNonCommentMarkupChoices() {
 		dataMatchDataTypeComboBox = createComboBox(VTOptionDefines.DATA_MATCH_DATA_TYPE,
 			DEFAULT_OPTION_FOR_DATA_MATCH_DATA_TYPE);
 		dataMatchDataTypeComboBox.setToolTipText(DATA_MATCH_DATA_TYPE_TOOLTIP);
+
+		dataTypeConflictHandlerComboBox = createComboBox(VTOptionDefines.DATA_TYPE_CONFLICT_HANDLER,
+			DEFAULT_OPTION_FOR_DATA_TYPE_CONFLICT_HANDLER);
+		dataTypeConflictHandlerComboBox.setToolTipText(DATA_TYPE_CONFLICT_HANDLER_TOOLTIP);
 
 		labelsComboBox = createComboBox(VTOptionDefines.LABELS, DEFAULT_OPTION_FOR_LABELS);
 		labelsComboBox.setToolTipText(LABELS_TOOLTIP);
@@ -464,6 +487,7 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 		functionSignatureComboBox.setToolTipText(FUNCTION_SIGNATURE_TOOLTIP);
 
 		useFunctionNamespaceCheckBox = createCheckBox("");
+		useEmptyCompositesCheckBox = createCheckBox("");
 	}
 
 	private JPanel createCommentsSubPanel() {
@@ -547,6 +571,10 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 			(ReplaceDataChoices) dataMatchDataTypeComboBox.getSelectedItem();
 		options.setEnum(DATA_MATCH_DATA_TYPE, dataMatchDataTypeChoice);
 
+		DataTypeConflictChoices dataTypeConflictHandlerChoice =
+			(DataTypeConflictChoices) dataTypeConflictHandlerComboBox.getSelectedItem();
+		options.setEnum(DATA_TYPE_CONFLICT_HANDLER, dataTypeConflictHandlerChoice);
+
 		LabelChoices labelsChoice = (LabelChoices) labelsComboBox.getSelectedItem();
 		options.setEnum(LABELS, labelsChoice);
 
@@ -560,6 +588,9 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 
 		boolean useNamespaces = useFunctionNamespaceCheckBox.isSelected();
 		options.setBoolean(USE_NAMESPACE_FUNCTIONS, useNamespaces);
+
+		boolean useEmptyComposites = useEmptyCompositesCheckBox.isSelected();
+		options.setBoolean(USE_EMPTY_COMPOSITES, useEmptyComposites);
 	}
 
 	private void updateCommentOptions(ToolOptions options) {
@@ -654,6 +685,12 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 			dataMatchDataTypeComboBox.setSelectedItem(dataMatchDataTypeChoice);
 		}
 
+		DataTypeConflictChoices dataTypeConflictHandlerChoice = options
+				.getEnum(DATA_TYPE_CONFLICT_HANDLER, DEFAULT_OPTION_FOR_DATA_TYPE_CONFLICT_HANDLER);
+		if (dataTypeConflictHandlerChoice != dataTypeConflictHandlerComboBox.getSelectedItem()) {
+			dataTypeConflictHandlerComboBox.setSelectedItem(dataTypeConflictHandlerChoice);
+		}
+
 		LabelChoices labelsChoice = options.getEnum(LABELS, DEFAULT_OPTION_FOR_LABELS);
 		if (labelsChoice != labelsComboBox.getSelectedItem()) {
 			labelsComboBox.setSelectedItem(labelsChoice);
@@ -675,6 +712,12 @@ public class ApplyMarkupPropertyEditor implements OptionsEditor {
 			options.getBoolean(USE_NAMESPACE_FUNCTIONS, DEFAULT_OPTION_FOR_NAMESPACE_FUNCTIONS);
 		if (useFunctionNamespaceCheckBox.isSelected() != useNamespace) {
 			useFunctionNamespaceCheckBox.setSelected(useNamespace);
+		}
+
+		boolean useEmtpyStructures =
+			options.getBoolean(USE_EMPTY_COMPOSITES, DEFAULT_OPTION_FOR_USE_EMPTY_STRUCTURES);
+		if (useEmptyCompositesCheckBox.isSelected() != useEmtpyStructures) {
+			useEmptyCompositesCheckBox.setSelected(useEmtpyStructures);
 		}
 	}
 

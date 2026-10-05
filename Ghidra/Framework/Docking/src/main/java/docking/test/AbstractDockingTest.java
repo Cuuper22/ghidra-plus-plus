@@ -36,6 +36,7 @@ import javax.swing.text.JTextComponent;
 
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Strings;
 import org.junit.*;
 
 import docking.*;
@@ -254,7 +255,7 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 	 *             (we are standardizing timeouts).  The timeouts passed to this method will
 	 *             be ignored in favor of the standard value.
 	 */
-	@Deprecated
+	@Deprecated(since = "9.1")
 	public static Window waitForWindow(String title, int timeoutMS) {
 		return waitForWindow(title);
 	}
@@ -351,19 +352,19 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 		}
 
 		String title = dialog.getTitle();
-		boolean isSavePrompt = StringUtils.containsAny(title, "Changed", "Saved");
+		boolean isSavePrompt = Strings.CS.containsAny(title, "Changed", "Saved");
 		if (!isSavePrompt) {
 			throw new AssertionError("Unexpected dialog with title '" + title + "'; " +
 				"Expected a dialog alerting to program changes");
 		}
 
-		if (StringUtils.contains(title, "Program Changed")) {
+		if (Strings.CS.contains(title, "Program Changed")) {
 			// the program is read-only or not in a writable project
 			pressButtonByText(dialog, "Continue");
 			return;
 		}
 
-		if (StringUtils.contains(title, "Save Program?")) {
+		if (Strings.CS.contains(title, "Save Program?")) {
 			pressButtonByText(dialog, "Cancel");
 			return;
 		}
@@ -609,7 +610,7 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 	 *             (we are standardizing timeouts).  The timeouts passed to this method will
 	 *             be ignored in favor of the standard value.
 	 */
-	@Deprecated
+	@Deprecated(since = "9.1")
 	public static <T extends DialogComponentProvider> T waitForDialogComponent(Window parentWindow,
 			Class<T> clazz, int timeoutMS) {
 		if (!DialogComponentProvider.class.isAssignableFrom(clazz)) {
@@ -711,13 +712,30 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 	private static <T extends ComponentProvider> T getComponentProvider(
 			DockingWindowManager windowManager, Class<T> clazz) {
 
+		/*
+			// Note: this code doesn't really make sense anymore.  If test pass, then delete this
+			// and getDetachedWindowProvider() 
+		
 		T detached = getDetachedWindowProvider(clazz, windowManager);
 		if (detached != null) {
 			return detached;
 		}
+		*/
 
 		T t = windowManager.getComponentProvider(clazz);
 		return t;
+	}
+
+	private static <T extends ComponentProvider> T getComponentProvider(
+			DockingWindowManager windowManager, Class<T> clazz, String title) {
+
+		List<T> allProviders = windowManager.getComponentProviders(clazz);
+		for (T t : allProviders) {
+			if (t.getTitle().equals(title)) {
+				return t;
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -808,7 +826,7 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 		int totalTime = 0;
 		while (totalTime <= DEFAULT_WAIT_TIMEOUT) {
 
-			T t = getComponentProvider(windowManager, clazz);
+			T t = getComponentProvider(windowManager, clazz, title);
 			if (Objects.deepEquals(title, t.getTitle())) {
 				return t;
 			}
@@ -1283,6 +1301,7 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 
 			ActionContext providerContext = provider.getActionContext(null);
 			if (providerContext != null) {
+				providerContext.setContextProvider(provider);
 				return providerContext;
 			}
 
@@ -1297,6 +1316,9 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 
 		assertNotNull("Action cannot be null", action);
 		assertNotNull("Action context cannot be null", context);
+
+		boolean isValid = runSwing(() -> action.isValidContext(context));
+		assertTrue("Attempted to invoke action with invalid context", isValid);
 
 		runSwing(() -> {
 
@@ -1338,11 +1360,13 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 
 			ActionContext newContext = provider.getActionContext(null);
 			if (newContext == null) {
+				actionContext.setContextProvider(provider);
 				return actionContext;
 			}
 
 			actionContext = newContext;
 			actionContext.setSourceObject(provider.getComponent());
+			actionContext.setContextProvider(provider);
 
 			return actionContext;
 		});
@@ -1366,6 +1390,7 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 			ActionContext actionContext = provider.getActionContext(null);
 			if (actionContext != null) {
 				actionContext.setSourceObject(provider.getComponent());
+				actionContext.setContextProvider(provider);
 			}
 			return actionContext;
 		});
@@ -2117,14 +2142,15 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 		if (!rootNode.getName().equals(rootName)) {
 			throw new RuntimeException(
 				"When selecting paths by name the first path element must be the " +
-					"name of the root node - path: " + StringUtils.join(path, '.'));
+					"name of the root node '" + rootNode.getName() + "' - path: " +
+					StringUtils.join(path, '.'));
 		}
 		GTreeNode node = rootNode;
 		for (int i = 1; i < path.length; i++) {
 			GTreeNode child = node.getChild(path[i]);
 			if (child == null) {
 				throw new RuntimeException(
-					"Can't find path " + StringUtils.join(path, '.') + "   failed at " + path[i]);
+					"Can't find path " + StringUtils.join(path, '/') + "   failed at " + path[i]);
 			}
 			node = child;
 		}
@@ -2198,7 +2224,17 @@ public abstract class AbstractDockingTest extends AbstractGuiTest {
 	}
 
 	public static boolean isEnabled(DockingActionIf action, ActionContextProvider contextProvider) {
-		return runSwing(() -> action.isEnabledForContext(contextProvider.getActionContext(null)));
+		return runSwing(() -> action.isEnabledForContext(createActionContext(contextProvider)));
+	}
+
+	public static ActionContext createActionContext(ActionContextProvider provider) {
+		return runSwing(() -> {
+			ActionContext context = provider.getActionContext(null);
+			if (context != null) {
+				context.setContextProvider(provider);
+			}
+			return context;
+		});
 	}
 
 	public static boolean isEnabled(AbstractButton button) {

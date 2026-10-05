@@ -539,7 +539,7 @@ bool SubvariableFlow::traceForward(ReplaceVarnode *rvn)
 	}
 	return false;
       }
-      if (((newmask & 1)!=0)&&(outvn->getSize()==flowsize)) {
+      if (((newmask & 1)!=0)&&(outvn->getSize()==flowsize)&&(bitsize >= 8 || (~newmask & outvn->getNZMask())==0)) {
 	addTerminalPatch(op,rvn);
 	hcount += 1;		// Dealt with this descendant
 	break;
@@ -1655,13 +1655,7 @@ int4 RuleSubvarCompZero::applyOp(PcodeOp *op,Funcdata &data)
 	if (vn0->isConstant()) return 0;
 	uintb mask0 = vn0->getConsume() & vn0->getNZMask();
 	uintb wholemask = calc_mask(vn0->getSize()) & mask0;
-	// We really need a popcnt here
-	// We want: if the number of bits that are both consumed
-	// and not known to be zero are "big" then don't continue
-	// because it doesn't look like a few bits getting manipulated
-	// within a status register
-	if ((wholemask & 0xff)==0xff) return 0;
-	if ((wholemask & 0xff00)==0xff00) return 0;
+	if (popcount(wholemask) >= 8) return 0;
       }
       break;
     default:
@@ -1799,15 +1793,17 @@ bool SplitFlow::addOp(PcodeOp *op,TransformVar *rvn,int4 slot)
   if (outvn->getDef() != (TransformOp *)0)
     return true;	// Already traversed
 
-  TransformOp *loOp = newOpReplace(op->numInput(), op->code(), op);
-  TransformOp *hiOp = newOpReplace(op->numInput(), op->code(), op);
+  TransformOp *loOp;
+  TransformOp *hiOp;
   int4 numParam = op->numInput();
   if (op->code() == CPUI_INDIRECT) {
-    opSetInput(loOp,newIop(op->getIn(1)),1);
-    opSetInput(hiOp,newIop(op->getIn(1)),1);
-    loOp->inheritIndirect(op);
-    hiOp->inheritIndirect(op);
+    loOp = newIndirectReplace(op);
+    hiOp = newIndirectReplace(op);
     numParam = 1;
+  }
+  else {
+    loOp = newOpReplace(op->numInput(), op->code(), op);
+    hiOp = newOpReplace(op->numInput(), op->code(), op);
   }
   for(int4 i=0;i<numParam;++i) {
     TransformVar *invn;
@@ -2137,11 +2133,13 @@ bool SplitDatatype::RootPointer::backUpPointer(Datatype *impliedBase)
 /// find it, we back up one level (through a PTRSUB, PTRADD, or INT_ADD). If it isn't found after 1 hop,
 /// \b false is returned.  Once this pointer is found, we back up through any single path of nested TYPE_STRUCT
 /// and TYPE_ARRAY offsets to establish the final root \b pointer, and \b true is returned. Any accumulated offset,
-/// relative to the original LOAD or STORE pointer is recorded in the \b baseOffset.
+/// relative to the original LOAD or STORE pointer is recorded in the \b baseOffset.  If we encounter
+/// union data-types during the traversal, we record their resolution for later reproduction.
 /// \param op is the LOAD or STORE
 /// \param valueType is the specific data-type to match
+/// \param resolver records any resolved union fields
 /// \return \b true if the root pointer is found
-bool SplitDatatype::RootPointer::find(PcodeOp *op,Datatype *valueType)
+bool SplitDatatype::RootPointer::find(PcodeOp *op,Datatype *valueType,ResolveCache &resolver)
 
 {
   Datatype *impliedBase = (Datatype *)0;
@@ -2151,12 +2149,14 @@ bool SplitDatatype::RootPointer::find(PcodeOp *op,Datatype *valueType)
     valueType = ((TypeArray *)valueType)->getBase();
     impliedBase = valueType;				// we allow an implied array (pointer to element) as a match
   }
+  int4 key = (op->code() == CPUI_LOAD) ? 0 : 1;
   loadStore = op;
   baseOffset = 0;
   firstPointer = pointer = op->getIn(1);
   Datatype *ct = pointer->getTypeReadFacing(op);
   if (ct->getMetatype() != TYPE_PTR)
     return false;
+  resolver.addResolution(key, pointer->getType(), op, 1);
   ptrType = (TypePointer *)ct;
   if (ptrType->getPtrTo() != valueType) {
     if (impliedBase != (Datatype *)0)
@@ -2169,8 +2169,10 @@ bool SplitDatatype::RootPointer::find(PcodeOp *op,Datatype *valueType)
   // The required pointer is found.  We try to back up to pointers to containing structures or arrays
   for(int4 i=0;i<3;++i) {
     if (pointer->isAddrTied() || pointer->loneDescend() == (PcodeOp *)0) break;
+    Varnode *lastVn = pointer;
     if (!backUpPointer(impliedBase))
       break;
+    resolver.addResolution(key, pointer->getType(), lastVn->getDef(), 0);
   }
   return true;
 }
@@ -2639,9 +2641,15 @@ void SplitDatatype::buildPointers(Varnode *rootVn,TypePointer *ptrType,int4 base
 	  newOff = 0;
 	}
       }
-      if (tmpType == newType || tmpType->getMetatype() == TYPE_ARRAY) {
+      Datatype *resType;
+      if (newType->needsResolution())
+	resType = resolver.resolve(isInput ? 0 : 1, newType);
+      else
+	resType = newType;
+
+      if (tmpType == resType || tmpType->getMetatype() == TYPE_ARRAY) {
 	int8 finalOffset = curOff - newOff;
-	int4 sz = newType->getSize();		// Element size in bytes
+	int4 sz = resType->getSize();		// Element size in bytes
 	finalOffset = finalOffset / sz;		// Number of elements
 	sz = AddrSpace::byteToAddressInt(sz, ptrType->getWordSize());
 	newOp = data.newOp(3,followOp->getAddr());
@@ -2660,11 +2668,12 @@ void SplitDatatype::buildPointers(Varnode *rootVn,TypePointer *ptrType,int4 base
 	data.opSetInput(newOp, inPtr, 0);
 	data.opSetInput(newOp, data.newConstant(inPtr->getSize(), finalOffset), 1);
       }
+      resolver.inheritResolution(isInput ? 0 : 1, inPtr, newOp, 0);
       inPtr = data.newUniqueOut(inPtr->getSize(), newOp);
       Datatype *tmpPtr = types->getTypePointerStripArray(ptrType->getSize(), newType, ptrType->getWordSize());
       inPtr->updateType(tmpPtr);
       data.opInsertBefore(newOp, followOp);
-      tmpType = newType;
+      tmpType = resType;
       curOff = newOff;
     } while(tmpType->getSize() > matchType->getSize());
     ptrVarnodes.push_back(inPtr);
@@ -2699,7 +2708,7 @@ bool SplitDatatype::isArithmeticOutput(Varnode *vn)
 }
 
 SplitDatatype::SplitDatatype(Funcdata &func)
-  : data(func)
+  : data(func), resolver(func)
 {
   Architecture *glb = func.getArch();
   types = glb->types;
@@ -2729,6 +2738,8 @@ bool SplitDatatype::splitCopy(PcodeOp *copyOp,Datatype *inType,Datatype *outType
     return false;
   vector<Varnode *> inVarnodes;
   vector<Varnode *> outVarnodes;
+  Datatype *unresOutType = outVn->getType();
+  resolver.addResolution(0,unresOutType, copyOp, -1);
   if (inVn->isConstant())
     buildInConstants(inVn,inVarnodes,outVn->getSpace()->isBigEndian());
   else
@@ -2741,6 +2752,7 @@ bool SplitDatatype::splitCopy(PcodeOp *copyOp,Datatype *inType,Datatype *outType
     data.opSetInput(newCopyOp,inVarnodes[i],0);
     data.opSetOutput(newCopyOp,outVarnodes[i]);
     data.opInsertBefore(newCopyOp, copyOp);
+    resolver.inheritResolution(0,unresOutType, dataTypePieces[i].offset, outVarnodes[i], newCopyOp, -1);
   }
   data.opDestroy(copyOp);
   return true;
@@ -2776,7 +2788,7 @@ bool SplitDatatype::splitLoad(PcodeOp *loadOp,Datatype *inType)
   if (isArithmeticInput(outVn))			// Sanity check on output
     return false;
   RootPointer root;
-  if (!root.find(loadOp,inType))
+  if (!root.find(loadOp,inType,resolver))
     return false;
   vector<Varnode *> ptrVarnodes;
   vector<Varnode *> outVarnodes;
@@ -2839,12 +2851,12 @@ bool SplitDatatype::splitStore(PcodeOp *storeOp,Datatype *outType)
     return false;
 
   RootPointer storeRoot;
-  if (!storeRoot.find(storeOp,outType))
+  if (!storeRoot.find(storeOp,outType,resolver))
     return false;
 
   RootPointer loadRoot;
   if (loadOp != (PcodeOp *)0) {
-    if (!loadRoot.find(loadOp,inType))
+    if (!loadRoot.find(loadOp,inType,resolver))
       return false;
   }
 
@@ -3016,7 +3028,22 @@ int4 RuleDumptyHumpLate::applyOp(PcodeOp *op,Funcdata &data)
   Varnode *vn = op->getIn(0);
   if (!vn->isWritten()) return 0;
   PcodeOp *pieceOp = vn->getDef();
-  if (pieceOp->code() != CPUI_PIECE) return 0;
+  OpCode opc = pieceOp->code();
+  if (opc == CPUI_SUBPIECE) {
+    // SUB(SUB(base,#c),#d)   =>  SUB(base,#c+#d)
+    Varnode *base = pieceOp->getIn(0);
+    data.opSetInput(op,base,0);
+    uintb trunc = op->getIn(1)->getOffset() + pieceOp->getIn(1)->getOffset();
+    if (trunc != op->getIn(1)->getOffset())
+      data.opSetInput(op,data.newConstant(4, trunc),1);
+    if (vn->hasNoDescend() && !vn->isAutoLive()) {
+      vector<PcodeOp *> scratch;
+      data.opDestroyRecursive(pieceOp, scratch);
+    }
+    return 1;
+  }
+  else if (opc != CPUI_PIECE)
+    return 0;
   Varnode *out = op->getOut();
   int4 outSize = out->getSize();
   int4 trunc = (int4)op->getIn(1)->getOffset();
@@ -3685,11 +3712,9 @@ bool LaneDivide::buildIndirect(PcodeOp *op,TransformVar *outVars,int4 numLanes,i
   TransformVar *inVn = setReplacement(op->getIn(0), numLanes, skipLanes);
   if (inVn == (TransformVar *)0) return false;
   for(int4 i=0;i<numLanes;++i) {
-    TransformOp *rop = newOpReplace(2, CPUI_INDIRECT, op);
+    TransformOp *rop = newIndirectReplace(op);
     opSetOutput(rop, outVars + i);
     opSetInput(rop,inVn + i, 0);
-    opSetInput(rop,newIop(op->getIn(1)),1);
-    rop->inheritIndirect(op);
   }
   return true;
 }
@@ -3878,24 +3903,29 @@ bool LaneDivide::buildZext(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 
 {
   int4 inLanes,inSkip;
   Varnode *invn = op->getIn(0);
-  if (!description.restriction(numLanes, skipLanes, 0, invn->getSize(), inLanes, inSkip)) {
-    return false;
-  }
+  if (!invn->isConstant() || invn->getOffset() != 0) {
+    if (!description.restriction(numLanes, skipLanes, 0, invn->getSize(), inLanes, inSkip)) {
+      return false;
+    }
   // inSkip should always come back as equal to skipLanes
-  if (inLanes == 1) {
-    TransformOp *rop = newOpReplace(1, CPUI_COPY, op);
-    TransformVar *inVar = getPreexistingVarnode(invn);
-    opSetInput(rop,inVar,0);
-    opSetOutput(rop,outVars);
+    if (inLanes == 1) {
+      TransformOp *rop = newOpReplace(1, CPUI_COPY, op);
+      TransformVar *inVar = getPreexistingVarnode(invn);
+      opSetInput(rop,inVar,0);
+      opSetOutput(rop,outVars);
+    }
+    else {
+      TransformVar *inRvn = setReplacement(invn,inLanes,inSkip);
+      if (inRvn == (TransformVar *)0) return false;
+      for(int4 i=0;i<inLanes;++i) {
+	TransformOp *rop = newOpReplace(1, CPUI_COPY, op);
+	opSetInput(rop,inRvn+i,0);
+	opSetOutput(rop,outVars + i);
+      }
+    }
   }
   else {
-    TransformVar *inRvn = setReplacement(invn,inLanes,inSkip);
-    if (inRvn == (TransformVar *)0) return false;
-    for(int4 i=0;i<inLanes;++i) {
-      TransformOp *rop = newOpReplace(1, CPUI_COPY, op);
-      opSetInput(rop,inRvn+i,0);
-      opSetOutput(rop,outVars + i);
-    }
+    inLanes = 0;
   }
   for(int4 i=0;i<numLanes-inLanes;++i) {			// Write 0 constants to remaining lanes
     TransformOp *rop = newOpReplace(1, CPUI_COPY, op);

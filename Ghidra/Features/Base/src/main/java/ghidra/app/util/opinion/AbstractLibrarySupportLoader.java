@@ -15,18 +15,22 @@
  */
 package ghidra.app.util.opinion;
 
+import java.awt.Component;
 import java.io.IOException;
 import java.util.*;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import javax.swing.JButton;
+
 import org.apache.commons.io.FilenameUtils;
 
-import ghidra.app.util.Option;
-import ghidra.app.util.OptionUtils;
+import docking.DockingWindowManager;
+import ghidra.app.util.*;
 import ghidra.app.util.bin.ByteProvider;
-import ghidra.app.util.importer.*;
+import ghidra.app.util.importer.LibrarySearchPathManager;
+import ghidra.app.util.importer.MessageLog;
 import ghidra.formats.gfilesystem.*;
 import ghidra.framework.model.*;
 import ghidra.plugin.importer.ImporterPlugin;
@@ -34,7 +38,7 @@ import ghidra.program.model.lang.*;
 import ghidra.program.model.listing.Library;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.ExternalManager;
-import ghidra.util.Msg;
+import ghidra.util.StringUtilities;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
@@ -98,6 +102,17 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 	static final boolean LOAD_ONLY_LIBRARIES_OPTION_DEFAULT = false;
 
 	/**
+	 * Gets a program property name to represent the ordered required library of the given index
+	 * 
+	 * @param libraryIndex The index of the required library
+	 * @return A program property name to represent the ordered required library of the given index
+	 */
+	public static String getRequiredLibraryProperty(int libraryIndex) {
+		return String.format("%s %s]", "Required Library [",
+			StringUtilities.pad("" + libraryIndex, ' ', 4));
+	}
+
+	/**
 	 * Loads bytes in a particular format into the given {@link Program}.
 	 *
 	 * @param program The {@link Program} to load into.
@@ -145,7 +160,7 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 			// Load (or get) the primary program
 			Program program = null;
 			if (!shouldLoadOnlyLibraries(settings)) {
-				program = doLoad(libraryNameList, settings);
+				program = doLoad(this, libraryNameList, settings);
 				loadedProgramList.add(new Loaded<>(program, settings));
 				settings.log().appendMsg("------------------------------------------------\n");
 			}
@@ -282,22 +297,47 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 		List<Option> list = super.getDefaultOptions(provider, loadSpec, domainObject,
 			loadIntoProgram, mirrorFsLayout);
 
-		list.add(new Option(LINK_EXISTING_OPTION_NAME, LINK_EXISTING_OPTION_DEFAULT, Boolean.class,
-			Loader.COMMAND_LINE_ARG_PREFIX + "-linkExistingProjectLibraries"));
-		list.add(new DomainFolderOption(LINK_SEARCH_FOLDER_OPTION_NAME,
-			Loader.COMMAND_LINE_ARG_PREFIX + "-projectLibrarySearchFolder", mirrorFsLayout));
-		list.add(new Option(LOAD_LIBRARY_OPTION_NAME, LOAD_LIBRARY_OPTION_DEFAULT, Boolean.class,
-			Loader.COMMAND_LINE_ARG_PREFIX + "-loadLibraries"));
+		list.add(Option.newBoolean(LINK_EXISTING_OPTION_NAME)
+				.value(LINK_EXISTING_OPTION_DEFAULT)
+				.commandLineArgument(createArg("-linkExistingProjectLibraries"))
+				.description("Search the project for existing library programs and create " +
+					"external references to them.")
+				.build());
+		list.add(Option.newDomainFolder(LINK_SEARCH_FOLDER_OPTION_NAME)
+				.commandLineArgument(createArg("-projectLibrarySearchFolder"))
+				.description("The project folder to search for existing libaries to link.")
+				.stateKey(Loader.OPTIONS_PROJECT_SAVE_STATE_KEY)
+				.hidden(mirrorFsLayout)
+				.build());
+		list.add(Option.newBoolean(LOAD_LIBRARY_OPTION_NAME)
+				.value(LOAD_LIBRARY_OPTION_DEFAULT)
+				.commandLineArgument(createArg("-loadLibraries"))
+				.description("Load libraries discovered in the specified search paths.")
+				.build());
 		list.add(new LibrarySearchPathDummyOption(LIBRARY_SEARCH_PATH_DUMMY_OPTION_NAME));
-		list.add(new Option(DEPTH_OPTION_NAME, DEPTH_OPTION_DEFAULT, Integer.class,
-			Loader.COMMAND_LINE_ARG_PREFIX + "-libraryLoadDepth"));
-		list.add(new DomainFolderOption(LIBRARY_DEST_FOLDER_OPTION_NAME,
-			Loader.COMMAND_LINE_ARG_PREFIX + "-libraryDestinationFolder", mirrorFsLayout));
-		list.add(new Option(MIRROR_LAYOUT_OPTION_NAME, Boolean.class, mirrorFsLayout,
-			Loader.COMMAND_LINE_ARG_PREFIX + "-libraryMirrorLayout", null, null, mirrorFsLayout));
-		list.add(new Option(LOAD_ONLY_LIBRARIES_OPTION_NAME, Boolean.class,
-			LOAD_ONLY_LIBRARIES_OPTION_DEFAULT,
-			Loader.COMMAND_LINE_ARG_PREFIX + "-loadOnlyLibraries", null, null, true));
+		list.add(Option.newInteger(DEPTH_OPTION_NAME)
+				.value(DEPTH_OPTION_DEFAULT)
+				.commandLineArgument(createArg("-libraryLoadDepth"))
+				.description("How many levels deep the depth-first library dependency tree will " +
+					"be traversed when loading libraries.")
+				.build());
+		list.add(Option.newDomainFolder(LIBRARY_DEST_FOLDER_OPTION_NAME)
+				.commandLineArgument(createArg("-libraryDestinationFolder"))
+				.description("The project folder to save newly loaded libraries to.")
+				.stateKey(Loader.OPTIONS_PROJECT_SAVE_STATE_KEY)
+				.hidden(mirrorFsLayout)
+				.build());
+		list.add(Option.newBoolean(MIRROR_LAYOUT_OPTION_NAME)
+				.value(mirrorFsLayout)
+				.commandLineArgument(createArg("-libraryMirrorLayout"))
+				.description("Mirror filesystem layout when saving newly loaded libraries.")
+				.hidden(mirrorFsLayout)
+				.build());
+		list.add(Option.newBoolean(LOAD_ONLY_LIBRARIES_OPTION_NAME)
+				.value(LOAD_ONLY_LIBRARIES_OPTION_DEFAULT)
+				.commandLineArgument(createArg("-loadOnlyLibraries"))
+				.hidden(true)
+				.build());
 
 		return list;
 	}
@@ -591,12 +631,12 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 					continue;
 				}
 				processed.add(library);
-				if (findLibraryInProject(library, libraryDestFolder, searchPaths,
+				if (findLibraryInProject(library, libraryDestFolder, searchPaths, true,
 					settings) != null) {
 					log.appendMsg("Found %s in %s...".formatted(library, libraryDestFolder));
 					log.appendMsg("------------------------------------------------\n");
 				}
-				else if (findLibraryInProject(library, linkSearchFolder, searchPaths,
+				else if (findLibraryInProject(library, linkSearchFolder, searchPaths, true,
 					settings) != null) {
 					log.appendMsg("Found %s in %s...".formatted(library, linkSearchFolder));
 					log.appendMsg("------------------------------------------------\n");
@@ -686,9 +726,10 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 
 				try (ByteProvider provider = createLibraryByteProvider(candidateLibraryFsrl,
 					desiredLoadSpec, log, monitor)) {
-					LoadSpec libLoadSpec = matchSupportedLoadSpec(settings.loadSpec(), provider);
+					LoadSpec libLoadSpec =
+						matchSupportedLoadSpec(settings.loadSpec(), provider, monitor);
 					if (libLoadSpec == null) {
-						log.appendMsg("Skipping library which is the wrong architecture: " +
+						log.appendMsg("Skipping library which is the wrong format/architecture: " +
 							candidateLibraryFsrl);
 						continue;
 					}
@@ -699,7 +740,8 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 						new ImporterSettings(provider, library, settings.project(),
 							libraryDestFolderPath, isMirroredLayout(settings), libLoadSpec, options,
 							consumer, log, monitor);
-					libraryProgram = doLoad(newLibraryList, librarySettings);
+					libraryProgram = doLoad((AbstractLibrarySupportLoader) libLoadSpec.getLoader(),
+						newLibraryList, librarySettings);
 					for (String newLibraryName : newLibraryList) {
 						unprocessed.add(new UnprocessedLibrary(newLibraryName, depth - 1, false));
 					}
@@ -738,12 +780,14 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 	 * @param folder {@link DomainFolder root folder} within which imported libraries will
 	 *   be searched. If null this method will return null.
 	 * @param searchPaths A {@link List} of {@link LibrarySearchPath}s that will be searched
+	 * @param matchLoadSpec True if the returned library must match the desired load spec; false
+	 *   if a match is not required
 	 * @param settings The {@link Loader.ImporterSettings}
 	 * @return The found {@link DomainFile} or null if not found
 	 * @throws CancelledException if the user cancelled the load
 	 */
 	protected DomainFile findLibraryInProject(String library, DomainFolder folder,
-			List<LibrarySearchPath> searchPaths, ImporterSettings settings)
+			List<LibrarySearchPath> searchPaths, boolean matchLoadSpec, ImporterSettings settings)
 			throws CancelledException {
 		if (folder == null) {
 			return null;
@@ -768,7 +812,8 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 				}
 				DomainFile ret =
 					lookupLibraryInFolder(FilenameUtils.getName(library), parentFolder);
-				if (ret != null) {
+				if (ret != null &&
+					(!matchLoadSpec || matchSupportedLoadSpec(settings.loadSpec(), ret))) {
 					return ret;
 				}
 			}
@@ -784,13 +829,19 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 			}
 		}
 
+		// First perform a direct filename lookup in the folder (for efficiency)
 		String libraryName = FilenameUtils.getName(library);
 		DomainFile file = folder.getFile(libraryName);
 		if (file != null) {
-			return file;
+			return !matchLoadSpec || matchSupportedLoadSpec(settings.loadSpec(), file) ? file
+					: null;
 		}
 
-		return lookupLibraryInFolder(libraryName, folder);
+		// If necessary, perform a slower comparator-based lookup on every file in the folder
+		file = lookupLibraryInFolder(libraryName, folder);
+		return file != null && (!matchLoadSpec || matchSupportedLoadSpec(settings.loadSpec(), file))
+				? file
+				: null;
 	}
 
 	/**
@@ -865,6 +916,7 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 	/**
 	 * Loads the given provider
 	 * 
+	 * @param loader The {@link AbstractLibrarySupportLoader} to perform the load with
 	 * @param libraryNameList A {@link List} to be populated with the loaded program's dependent
 	 *   library names
 	 * @param settings The {@link Loader.ImporterSettings}
@@ -872,18 +924,18 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 	 * @throws CancelledException if the user cancelled the load operation
 	 * @throws IOException if there was an IO-related error during the load
 	 */
-	private Program doLoad(List<String> libraryNameList, ImporterSettings settings)
-			throws CancelledException, IOException {
+	private Program doLoad(AbstractLibrarySupportLoader loader, List<String> libraryNameList,
+			ImporterSettings settings) throws CancelledException, IOException {
 		MessageLog log = settings.log();
 
-		Program program = createProgram(settings);
+		Program program = loader.createProgram(settings);
 
 		int transactionID = program.startTransaction("Loading");
 		boolean success = false;
 		try {
 			log.appendMsg("Loading %s...".formatted(settings.provider().getFSRL()));
-			load(program, settings);
-			createDefaultMemoryBlocks(program, settings);
+			loader.load(program, settings);
+			loader.createDefaultMemoryBlocks(program, settings);
 			libraryNameList.addAll(getLibraryNames(settings.provider(), program));
 			success = true;
 			return program;
@@ -936,38 +988,48 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 				continue;
 			}
 			monitor.checkCancelled();
-			try {
-				Loaded<Program> match = findLibraryInLoadedList(loadedPrograms, externalLibName);
-				if (match != null) {
-					extManager.setExternalPath(externalLibName, FSUtilities
-							.appendPath(match.getProjectFolderPath(), match.getName()),
-						false);
-					log.appendMsg("  [" + externalLibName + "] -> [" + match.getName() + "]");
-				}
-				else {
-					boolean found = false;
-					for (DomainFolder searchFolder : searchFolders) {
-						DomainFile alreadyImportedLib = findLibraryInProject(externalLibName,
-							searchFolder, fsSearchPaths, settings);
-						if (alreadyImportedLib != null) {
-							extManager.setExternalPath(externalLibName,
-								alreadyImportedLib.getPathname(), false);
-							log.appendMsg("  [" + externalLibName + "] -> [" +
-								alreadyImportedLib.getPathname() + "] (previously imported)");
-							found = true;
-							break;
-						}
-					}
-					if (!found) {
-						log.appendMsg("  [" + externalLibName + "] -> not found in project");
-					}
-				}
+			Loaded<Program> match = findLibraryInLoadedList(loadedPrograms, externalLibName);
+			if (match != null) {
+				setExternalLibrary(externalLibName,
+					FSUtilities.appendPath(match.getProjectFolderPath(), match.getName()), program,
+					settings);
 			}
-			catch (InvalidInputException e) {
-				Msg.error(this, "Bad library name: " + externalLibName, e);
+			else {
+				boolean found = false;
+				for (DomainFolder searchFolder : searchFolders) {
+					DomainFile alreadyImportedLib = findLibraryInProject(externalLibName,
+						searchFolder, fsSearchPaths, false, settings);
+					if (alreadyImportedLib != null) {
+						if (matchSupportedLoadSpec(settings.loadSpec(), alreadyImportedLib)) {
+							setExternalLibrary(externalLibName, alreadyImportedLib.getPathname(),
+								program, settings);
+						}
+						else {
+							log.appendMsg("  [%s] -> found wrong format/architecture"
+									.formatted(externalLibName));
+						}
+						found = true;
+						break;
+					}
+				}
+				if (!found) {
+					log.appendMsg("  [%s] -> not found in project".formatted(externalLibName));
+				}
 			}
 		}
 		log.appendMsg("------------------------------------------------\n");
+	}
+
+	private void setExternalLibrary(String libraryName, String pathname, Program program,
+			ImporterSettings settings) {
+		MessageLog log = settings.log();
+		try {
+			program.getExternalManager().setExternalPath(libraryName, pathname, false);
+			log.appendMsg("  [%s] -> [%s] (previously imported)".formatted(libraryName, pathname));
+		}
+		catch (InvalidInputException e) {
+			log.appendMsg("  [%s] -> bad library name".formatted(libraryName));
+		}
 	}
 
 	/**
@@ -1126,21 +1188,72 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 	 * 
 	 * @param desiredLoadSpec The desired {@link LoadSpec}
 	 * @param provider The provider
-	 * @return A supported {@link LoadSpec} that matches the desired one, or null of none matched
+	 * @param monitor A cancelable task monitor
+	 * @return A supported {@link LoadSpec} that matches the desired one, or null of none matched.
+	 *   The returned {@link LoadSpec}'s associated {@link Loader} is guaranteed to be an instance
+	 *   of {@link AbstractLibrarySupportLoader}.
 	 * @throws IOException if there was an IO-related error
 	 */
-	protected LoadSpec matchSupportedLoadSpec(LoadSpec desiredLoadSpec, ByteProvider provider)
-			throws IOException {
+	protected LoadSpec matchSupportedLoadSpec(LoadSpec desiredLoadSpec, ByteProvider provider,
+			TaskMonitor monitor) throws IOException {
 		LanguageCompilerSpecPair desiredPair = desiredLoadSpec.getLanguageCompilerSpec();
-		Collection<LoadSpec> supportedLoadSpecs = findSupportedLoadSpecs(provider);
-		if (supportedLoadSpecs != null) { // shouldn't be null, but protect against rogue loaders
-			for (LoadSpec supportedLoadSpec : supportedLoadSpecs) {
-				if (desiredPair.equals(supportedLoadSpec.getLanguageCompilerSpec())) {
+		LoaderMap loaderMap = LoaderService.getSupportedLoadSpecs(provider,
+			loader -> getCompatibleLibraryFormats().contains(loader.getName()), monitor);
+		for (Loader loader : loaderMap.keySet()) {
+			for (LoadSpec supportedLoadSpec : loaderMap.get(loader)) {
+				if (matchLanguageIdIgnoringVariant(desiredPair.getLanguageID().getIdAsString(),
+					supportedLoadSpec.getLanguageCompilerSpec().getLanguageID().getIdAsString())) {
 					return supportedLoadSpec;
 				}
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * {@return whether or not the given {@link LoadSpec} matches the one associated with the given 
+	 * {@link DomainFile}}
+	 * <p>
+	 * To avoid having to open each library which might require an upgrade, we just look at the 
+	 * "Language ID" metadata attached to the {@link DomainFile}.
+	 * 
+	 * @param desiredLoadSpec The desired {@link LoadSpec}
+	 * @param df The {@link DomainFile}
+	 */
+	protected boolean matchSupportedLoadSpec(LoadSpec desiredLoadSpec, DomainFile df) {
+		String fileLangId = df.getMetadata().getOrDefault("Language ID", "");
+		String fileFormat = df.getMetadata().getOrDefault("Executable Format", "");
+
+		String desiredLangId =
+			desiredLoadSpec.getLanguageCompilerSpec().getLanguageID().getIdAsString();
+
+		return getCompatibleLibraryFormats().contains(fileFormat) &&
+			matchLanguageIdIgnoringVariant(fileLangId, desiredLangId);
+	}
+
+	/**
+	 * {@return whether or not the given language ID strings are equal, not taking the variant into 
+	 * account}
+	 * 
+	 * @param id1 The first language ID to compare
+	 * @param id2 The second language ID to compare
+	 */
+	protected boolean matchLanguageIdIgnoringVariant(String id1, String id2) {
+		String[] parts1 = id1.split(":");
+		String[] parts2 = id2.split(":");
+		return parts1.length >= 3 && parts2.length >= 3 &&
+			Arrays.equals(parts1, 0, 3, parts2, 0, 3);
+	}
+
+	/**
+	 * {@return a {@link List} of file formats that this {@link AbstractLibrarySupportLoader}
+	 * supports loading as a library}
+	 * <p>
+	 * By default, an {@link AbstractLibrarySupportLoader} is compatible with loading its own file
+	 * format as a library.
+	 */
+	protected List<String> getCompatibleLibraryFormats() {
+		return List.of(getName());
 	}
 
 	/**
@@ -1177,4 +1290,41 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
 	private boolean isAbsoluteLibraryPath(String path) {
 		return FilenameUtils.getPrefixLength(path) > 0;
 	}
+
+	/**
+	 * A dummy {@link Option} used to render a button that will allow the user to edit the global
+	 * list of library search paths
+	 */
+	private static class LibrarySearchPathDummyOption extends Option {
+
+		/**
+		 * Creates a new {@link LibrarySearchPathDummyOption}
+		 * 
+		 * @param name The name of the option
+		 */
+		public LibrarySearchPathDummyOption(String name) {
+			super(name, null, null, null, null, null, false, "Edit the library search paths.");
+		}
+
+		@Override
+		public Component getCustomEditorComponent(AddressFactoryService addressFactoryService) {
+			JButton button = new JButton("Edit Paths");
+			button.setToolTipText(getDescription());
+			button.addActionListener(e -> {
+				DockingWindowManager.showDialog(null, new LibraryPathsDialog());
+			});
+			return button;
+		}
+
+		@Override
+		public Class<?> getValueClass() {
+			return Object.class;
+		}
+
+		@Override
+		public Option copy() {
+			return new LibrarySearchPathDummyOption(getName());
+		}
+	}
+
 }
