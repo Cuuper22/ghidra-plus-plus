@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -x "$ROOT/runtime/java/bin/java" ]]; then
+  export JAVA_HOME="$ROOT/runtime/java"
+  export PATH="$JAVA_HOME/bin:$PATH"
+fi
+exec "$ROOT/support/launch.sh" fg jdk Ghidra++ 2G "" ghidraplus.GhidraPlusPlus "$@"

@@ -90,3 +90,14 @@ core.*
 __pycache__
 
 gradle.lockfile
+
+# Ghidra++ build output, local Ghidra projects, and secrets
+/work/
+/dist/
+Ghidra/Features/GhidraPlusPlus/data/web/
+*.gpr
+*.rep/
+*.lock
+*.lock~
+.env
+.env.*
