@@ -11,7 +11,7 @@ Ghidra++ is an open-source Ghidra fork that helps people understand compiled pro
 - Reuse Ghidra's decoding, decompilation, project storage, and plugin services. Avoid changing upstream code unless required.
 - Keep model access replaceable. TypeSafe supplies structured judgments now; custom model training is deferred.
 - Keep secrets, private binaries, generated analysis, build products, and temporary test files out of Git.
-- Batch related model questions and cache against evidence, questions, and model version. Invalidate dependent results when evidence changes.
+- Ask the model about one function per request; mixing functions in one request lowered accuracy. Cache answers against evidence, questions, and model version. Invalidate dependent results when evidence changes.
 - Verify real behavior, including applying and undoing changes and saving/reopening a project. Use the running interface to check the experience.
 - Finish changes by removing superseded code and updating the page affected by the change.
 
